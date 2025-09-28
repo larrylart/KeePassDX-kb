@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory
+        android:title="@string/label_select_output_device" />
+
+    <!-- Custom Material row (outlined dropdown + inline switch) -->
+    <com.kunzisoft.keepass.settings.preference.OutputDeviceRowPreference
+        android:key="pref_output_dongle_row"
+        app:layout="@layout/pref_output_device_row" />
+
+	<!-- Pair/Unpair action -->
+	<com.kunzisoft.keepass.settings.ActionButtonStartPreference
+		android:key="pref_output_dongle_connect"
+		android:title="@string/label_bt_pairing"
+		android:summary="@string/btn_connect_summary"
+		app:layout="@layout/pref_row_button_start" />
+		
+    <!-- "Send new line" option below the row -->
+    <SwitchPreferenceCompat
+        android:key="@string/output_device_send_new_line_key"
+        android:title="@string/label_send_new_line"
+        android:defaultValue="false" />		
+</PreferenceScreen>

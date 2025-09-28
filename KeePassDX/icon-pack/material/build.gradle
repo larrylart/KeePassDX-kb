@@ -1,0 +1,13 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'com.kunzisoft.keepass.icon.material'
+    compileSdkVersion 36
+
+    defaultConfig {
+        minSdkVersion 14
+        targetSdkVersion 35
+    }
+
+    resourcePrefix 'material_'
+}

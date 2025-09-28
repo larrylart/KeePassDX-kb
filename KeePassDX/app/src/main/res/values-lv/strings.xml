@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Copyright 2020 Jeremy Jamet / Kunzisoft.
+
+    This file is part of KeePassDX.
+
+    KeePassDX is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    KeePassDX is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with KeePassDX.  If not, see <http://www.gnu.org/licenses/>.
+--><resources>
+    <string name="feedback">Atsauksmes</string>
+    <string name="homepage">Mājaslapa</string>
+    <string name="about_description">KeePassDX ir KeePass paroļu menedžera Android implementācija</string>
+    <string name="accept">Pieņemt</string>
+    <string name="add_entry">Jauns ieraksts</string>
+    <string name="add_group">Jauna grupa</string>
+    <string name="encryption_algorithm">Šifrēšanas algoritms</string>
+    <string name="app_timeout">Neaktivitātes laiks</string>
+    <string name="app_timeout_summary">Bloķēšanas taimauts, kad programma nav aktīva</string>
+    <string name="application">Lietotne</string>
+    <string name="menu_app_settings">Programmas iestatījumi</string>
+    <string name="brackets">Iekavas</string>
+    <string name="file_manager_install_description">Failu pārlūkošanai nepieciešams pārlūks.</string>
+    <string name="clipboard_cleared">Starpliktuve notīrīta</string>
+    <string name="clipboard_error_title">Starpliktuves kļūda</string>
+    <string name="clipboard_error">Dažas ierīces neļauj lietotnēm izmantot starpliktuvi.</string>
+    <string name="clipboard_error_clear">Nevarēja notīrīt starpliktuvi</string>
+    <string name="clipboard_timeout">Starpliktuves taimauts</string>
+    <string name="clipboard_timeout_summary">Notīrīšanas taimauts pēc lietotājvārda vai paroles kopēšana starpliktuvē</string>
+    <string name="select_to_copy">%1$s uz starpliktuvi</string>
+    <string name="retrieving_db_key">Izveido datu bāzes atslēgu…</string>
+    <string name="database">Datu bāze</string>
+    <string name="decrypting_db">Atšifrē datubāzes saturu…</string>
+    <string name="default_checkbox">Izmantot šo kā manu noklusējuma datu bāzi</string>
+    <string name="digits">Cipari</string>
+    <string name="select_database_file">Ievadiet datu bāzes nosaukumu</string>
+    <string name="entry_accessed">Piekļuve</string>
+    <string name="entry_cancel">Atcelt</string>
+    <string name="entry_notes">Komentāri</string>
+    <string name="entry_confpassword">Apstipriniet paroli</string>
+    <string name="entry_created">Izveidots</string>
+    <string name="entry_expires">Derīguma termiņš beidzas</string>
+    <string name="entry_keyfile">Atslēgas fails</string>
+    <string name="entry_modified">Modificēts</string>
+    <string name="entry_password">Parole</string>
+    <string name="save">Saglabāt</string>
+    <string name="entry_title">Vārds</string>
+    <string name="entry_url">URL</string>
+    <string name="entry_user_name">Lietotājvārds</string>
+    <string name="error_arc4">Arcfour plūsmas šifrs netiek atbalstīts.</string>
+    <string name="error_can_not_handle_uri">Neizdevās pātiet uz norādīto adresi.</string>
+    <string name="error_file_not_create">Neizdevās izveidot failu</string>
+    <string name="error_invalid_db">Nevarēja nolasīt datubāzi.</string>
+    <string name="error_invalid_path">Nederīgs ceļš.</string>
+    <string name="error_no_name">Ievadiet nosaukumu.</string>
+    <string name="error_nokeyfile">Atlasiet atslēgas failu.</string>
+    <string name="error_out_of_memory">Darbam ar datu bāzi, tālrunī nepietiek atmiņas.</string>
+    <string name="error_pass_gen_type">Ir jāatlasa vismaz viens paroles ģenerēšanas veids.</string>
+    <string name="error_pass_match">Paroles nesakrīt.</string>
+    <string name="error_rounds_too_large">\"Šifrēšanas kārtas\" vērtība ir pārāk liela. Iestata uz 2147483648.</string>
+    <string name="error_string_key">A field name is required for each string.</string>
+    <string name="error_wrong_length">Ievadiet pozitīvu veselu skaitli \"Garums\" laukā.</string>
+    <string name="field_name">Lauka nosaukums</string>
+    <string name="field_value">Lauka vērtība</string>
+    <string name="file_browser">Failu pārvaldnieks</string>
+    <string name="generate_password">Ģenerēt paroli</string>
+    <string name="hint_conf_pass">apstipriniet paroli</string>
+    <string name="hint_generated_password">Ģenerēta parole</string>
+    <string name="hint_group_name">Grupas nosaukums</string>
+    <string name="hint_keyfile">Atslēgas fails</string>
+    <string name="hint_length">garums</string>
+    <string name="hint_pass">parole</string>
+    <string name="password">Parole</string>
+    <string name="invalid_credentials">Nederīga parole vai atslēgas fails.</string>
+    <string name="invalid_algorithm">Nederīgs algoritms.</string>
+    <string name="invalid_db_sig">Datu bāzes formāts nav atpazīts.</string>
+    <string name="keyfile_is_empty">Atslēgas fails ir tukšs.</string>
+    <string name="length">Garums</string>
+    <string name="list_size_title">Grupu saraksta teksta izmērs</string>
+    <string name="list_size_summary">Teksta izmērs ierakstos un grupu sarakstos</string>
+    <string name="loading_database">Ielādēt datu bāzi…</string>
+    <string name="lowercase">Mazie burti</string>
+    <string name="hide_password_title">Sēpt paroles</string>
+    <string name="hide_password_summary">Sēpt paroles *****</string>
+    <string name="about">Par</string>
+    <string name="menu_change_key_settings">Mainīt galveno paroli</string>
+    <string name="settings">Iestatījumi</string>
+    <string name="menu_database_settings">Datu bāzes iestatījumi</string>
+    <string name="menu_delete">Dzēst</string>
+    <string name="menu_donate">Ziedot</string>
+    <string name="menu_edit">Rediģēt</string>
+    <string name="menu_hide_password">Paslēpt paroli</string>
+    <string name="menu_lock">Bloķēt datu bāzi</string>
+    <string name="menu_open">Atvērt</string>
+    <string name="menu_search">Meklēšana</string>
+    <string name="menu_showpass">Rādīt paroli</string>
+    <string name="menu_url">Saite</string>
+    <string name="minus">Minus</string>
+    <string name="never">Nekad</string>
+    <string name="no_results">Nav meklēšanas rezultātu</string>
+    <string name="no_url_handler">Neizdevās atvērt saiti.</string>
+    <string name="progress_create">Izveido jaunu datu bāzi…</string>
+    <string name="progress_title">Darbojas…</string>
+    <string name="protection">Aizsardzība</string>
+    <string name="content_description_remove_from_list">Noņemt</string>
+    <string name="root">Root</string>
+    <string name="rounds">Šifrēšanas līmeņi</string>
+    <string name="rounds_explanation">Augstākā līmeņa šifrēšana sniedz lielāku aizsardzību, bet palēnina darbības ar datu bāzēm.</string>
+    <string name="saving_database">Datu bāzes saglabāšana…</string>
+    <string name="space">Atstarpe</string>
+    <string name="sort_db">Izejas</string>
+    <string name="special">Speciālie</string>
+    <string name="search">Ieraksta nosaukums/apraksts</string>
+    <string name="underline">Pasvītrojums</string>
+    <string name="unsupported_db_version">Neatbalstīta datu bāzes versija.</string>
+    <string name="uppercase">Lielie burti</string>
+    <string name="version_label">Versija %1$s</string>
+    <string name="education_unlock_summary">Ievadiet paroli un/vai atslēgas failu, lai atbloķētu datubāzi.\n\nNeaizmirstiet pēc katras izmaiņas saglabāt datubāzes faila rezerves kopiju drošā vietā.</string>
+    <string-array name="list_size_options">
+        <item>Mazs</item>
+        <item>Vidējs</item>
+        <item>Liels</item>
+    </string-array>
+    <string name="edit_entry">Labot ierakstu</string>
+    <string name="encryption">Šifrēšana</string>
+    <string name="extended_ASCII">Paplašinātais ASCII</string>
+    <string name="allow">Atļaut</string>
+    <string name="html_about_licence">KeePassDX © %1$d Kunzisoft — &lt;strong&gt;atvērtā pirmkoda&lt;/strong&gt; lietotne &lt;strong&gt;bez reklāmām&lt;/strong&gt;.\nTā tiek izplatīta tāda, kāda tā ir, saskaņā ar &lt;strong&gt;GPLv3&lt;/strong&gt; licenci bez jebkādām garantijām.</string>
+    <string name="menu_copy">Kopēt</string>
+    <string name="education_lock_title">Bloķēt datubāzi</string>
+    <string name="character_count">Rakstzīmju skaits: %1$d</string>
+    <string name="clipboard">Starpliktuve</string>
+    <string name="notification">Paziņojums</string>
+    <string name="parallelism">Paralēlisma līmenis, Vienlaicīga apstrāde, Paralēla darbība</string>
+    <string name="warning">Brīdinājums</string>
+    <string name="content">Saturs</string>
+    <string name="compression_gzip">Gzip</string>
+    <string name="otp_digits">Cipari</string>
+    <string name="download">Lejupielādēt</string>
+    <string name="disable">Atspējot</string>
+    <string name="text_appearance">Teksts</string>
+    <string name="file_name">Datnes nosaukums</string>
+    <string name="unit_gibibyte">GiB</string>
+    <string name="application_appearance">Saskarne</string>
+    <string name="enable">Iespējot</string>
+    <string name="menu_appearance_settings">Izskats</string>
+    <string name="unit_byte">B</string>
+    <string name="sort_menu">Kārtot pēc</string>
+    <string name="sort_last_access_time">Piekļuves datuma</string>
+    <string name="hide_templates_title">Paslēpt veidnes</string>
+    <string name="otp_algorithm">Algoritms</string>
+    <string name="contact">Kontakti</string>
+    <string name="security">Drošība</string>
+    <string name="key_derivation_function">Atslēgu ģenerēšanas funkcija</string>
+    <string name="entry_history">Vēsture</string>
+    <string name="entry_attachments">Pielikumi</string>
+    <string name="current_group">Pašreizējā grupa</string>
+    <string name="case_sensitive">Reģistrjutīgs</string>
+    <string name="sort_username">Lietotājvārda</string>
+    <string name="sort_creation_time">Izveidošanas datuma</string>
+    <string name="sort_last_modify_time">Modificēšanas datuma</string>
+    <string name="lock">Bloķēšana</string>
+    <string name="icon_pack_choose_summary">Ikonu komplekts, ko izmantot lietotnē</string>
+    <string name="database_history">Vēsture</string>
+    <string name="keyboard_keys_category">Taustiņi</string>
+    <string name="style_name_forest">Mežs</string>
+    <string name="style_name_divine">Dievišķīgs</string>
+    <string name="style_name_classic">Klasisks</string>
+    <string name="style_name_follow_system">Kā sistēmā iestatīts</string>
+    <string name="autofill">Automātiskā aizpildīšana</string>
+    <string name="info">Informācija</string>
+    <string name="menu_move">Pārvietot</string>
+    <string name="menu_paste">Ielīmēt</string>
+    <string name="menu_cancel">Atcelt</string>
+    <string name="sort_title">Nosaukuma</string>
+    <string name="style_choose_title">Lietotnes motīvs</string>
+    <string name="style_choose_summary">Motīvs, ko izmantot lietotnē</string>
+    <string name="style_brightness_title">Motīva spilgtums</string>
+    <string name="icon_pack_choose_title">Ikonu komplekts</string>
+    <string name="data">Dati</string>
+    <string name="keyboard">Tastatūra</string>
+    <string name="keyboard_appearance_category">Izskats</string>
+    <string name="backspace">Atpakaļatkāpes taustiņš</string>
+    <string name="unit_kibibyte">KiB</string>
+    <string name="unit_mebibyte">MiB</string>
+    <string name="download_canceled">Atcelts!</string>
+    <string name="entropy">Entropija: %1$s biti</string>
+    <string name="entropy_high">Entropija: Augsta</string>
+    <string name="style_name_simple">Vienkāršs</string>
+    <string name="style_name_moon">Mēness</string>
+    <string name="style_name_sun">Saule</string>
+    <string name="style_name_reply">Atbilde</string>
+</resources>
