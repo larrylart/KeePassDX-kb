@@ -12,13 +12,10 @@ The dongle receives key events from KeePassDX over Bluetooth and injects them in
 
 The hardware used is the **LILYGO T-Dongle-S3 ESP32-S3 TTGO Development Board**, which features:
 
-- 0.96-inch ST7735 LCD display  
-- TF card slot  
-- USB HID capable ESP32-S3  
+| Features | Image |
+|---|---|
+| <ul><li>0.96-inch ST7735 LCD display</li><li>TF card slot</li><li>USB HID capable ESP32-S3</li></ul><br><strong>You can find this board on:</strong><br>• Amazon ($30)<br>• AliExpress ($17) | <img src="doc/lilygo_usb_s3_dongle_.jpg" alt="LILYGO T-Dongle-S3" width="260"> |
 
-You can find this board on:
-- Amazon (~$30)  
-- AliExpress (~$17)  
 
 ### Dongle Software
 
@@ -72,6 +69,10 @@ The following changes were made to KeePassDX:
   - Enable/disable dongle use (toggles the send-button next to password fields)  
   - Select and pair with a dongle (default name: `KPKB_SRV01`)  
   - Configure whether to **append a newline (`\n`)** when sending passwords  
+
+![Settings](doc/KeePassDX_settings.jpg)
+![Settings Output](doc/KeePassDX_settings_output.jpg)
+![Send Password](doc/KeePassDX_sendpass.jpg)
 
 ---
 
