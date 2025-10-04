@@ -776,6 +776,35 @@ object PreferencesUtil {
 		return prefs.getBoolean(key, /* defaultValue from XML is false */ false)
 	}	
 	
+	///////
+	// new: top dev type and keyboard layout
+    // Device Type (stub)
+    fun getDeviceType(context: Context): String? {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        return prefs.getString(context.getString(R.string.pref_device_type_key), null)
+    }
+    fun setDeviceType(context: Context, value: String?) {
+        PreferenceManager.getDefaultSharedPreferences(context).edit().apply {
+            if (value == null) remove(context.getString(R.string.pref_device_type_key))
+            else putString(context.getString(R.string.pref_device_type_key), value)
+            apply()
+        }
+    }
+
+    // Keyboard Layout
+    fun getKeyboardLayout(context: Context): String? {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        return prefs.getString(context.getString(R.string.pref_keyboard_layout_key), null)
+    }
+    fun setKeyboardLayout(context: Context, value: String?) {
+        PreferenceManager.getDefaultSharedPreferences(context).edit().apply {
+            if (value == null) remove(context.getString(R.string.pref_keyboard_layout_key))
+            else putString(context.getString(R.string.pref_keyboard_layout_key), value)
+            apply()
+        }
+    }
+	
+	
 	// end of Larry's add
 	/////////
 

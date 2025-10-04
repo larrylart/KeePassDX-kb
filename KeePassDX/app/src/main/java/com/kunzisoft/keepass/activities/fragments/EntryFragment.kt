@@ -214,7 +214,22 @@ class EntryFragment: DatabaseFragment() {
 				val payload = field.protectedValue.stringValue.toByteArray(Charsets.UTF_8)
 
 				// Use the global hub (will connect if needed; will NOT disconnect after)
-				com.kunzisoft.keepass.receivers.BleHub.writePassword(
+				val valueToSend = field.protectedValue.stringValue
+
+				BleHub.sendStringAwaitHash(
+					value = valueToSend
+				) { ok, err ->
+					ui.post {
+						ui.removeCallbacks(fallback)
+						templateView.setSendInProgress(false)
+						val msg = if (ok) getString(R.string.msg_sent_ok)
+								  else getString(R.string.msg_send_failed) + (err?.let { ": $it" } ?: "")
+						Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+					}
+				}
+				
+				// old method - to clean
+				/*com.kunzisoft.keepass.receivers.BleHub.writePassword(
 					bytes = payload,
 					address = address
 				) { ok, err ->
@@ -226,7 +241,7 @@ class EntryFragment: DatabaseFragment() {
 								  else getString(R.string.msg_send_failed) + (err?.let { ": $it" } ?: "")
 						Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 					}
-				}
+				}*/
 			}
 		
 			

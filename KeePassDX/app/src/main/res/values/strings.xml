@@ -766,7 +766,7 @@
 	<string name="msg_sent_ok">Password sent</string>
 	<string name="msg_send_failed">Send failed</string>
 
-	<!-- Keys & labels -->
+	<!-- Keys and labels -->
 	<string name="output_device_enable_title">Enable device output</string>
 	<string name="output_device_send_new_line_key">pref_output_send_new_line</string>
 	<string name="label_send_new_line">Send new line</string>
@@ -775,5 +775,19 @@
     <string name="label_bt_pairing">Bluetooth pairing</string>
     <string name="btn_pair">Pair</string>
 
+	<!-- Output device extra prefs -->
+	<string name="pref_device_type_key">pref_device_type</string>
+	<string name="pref_keyboard_layout_key">pref_keyboard_layout</string>
 
+	<string name="label_device_type">Device Type</string>
+	<string name="label_keyboard_layout">Keyboard Layout</string>
+
+	<string name="device_type_blue_kb">Blue Keyboard</string>
+
+	<!-- Toast/messages -->
+	<string name="msg_layout_set_ok">Keyboard layout set</string>
+	<string name="msg_layout_set_failed">Failed to set keyboard layout</string>
+	<string name="msg_no_device_selected">Select an output device first</string>
+	<string name="msg_failed_connect_device">Failed to connect to device</string>
+	
 </resources>

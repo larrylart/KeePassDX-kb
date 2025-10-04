@@ -32,6 +32,8 @@ class BluetoothDeviceManager(private val context: Context) {
     private val devicesMap = LinkedHashMap<String, BtDevice>()
     private var scanning = false
 
+	@Volatile private var currentMtu: Int = 23
+
     fun isBluetoothReady(): Boolean = adapter?.isEnabled == true
 
     /** Pull bonded devices and merge into map. */
@@ -123,6 +125,37 @@ class BluetoothDeviceManager(private val context: Context) {
 	@Volatile private var lastCharacteristic: android.bluetooth.BluetoothGattCharacteristic? = null
 	@Volatile private var closeAfterOp = true   // legacy single-shot = true; persistent = false
 
+
+	// new
+    @Volatile private var notifyCharacteristic: android.bluetooth.BluetoothGattCharacteristic? = null
+    @Volatile private var notificationsEnabled = false
+	
+	// --- notification one-shot + stream support ---
+	@Volatile private var notifListener: ((ByteArray?) -> Unit)? = null
+	private val notifTimeouts = Handler(Looper.getMainLooper())
+
+	// queue to hold packets that arrive when no waiter is set
+	private val notifBuffer: ArrayDeque<ByteArray> = ArrayDeque()
+
+	// streaming listener: active while we want to collect multiple notifications
+	@Volatile private var streamListener: ((ByteArray) -> Unit)? = null
+
+	// end new
+
+	fun startNotificationStream(onChunk: (ByteArray) -> Unit) {
+		streamListener = onChunk
+		// Immediately deliver anything that arrived before the stream was started
+		synchronized(notifBuffer) {
+			while (notifBuffer.isNotEmpty()) {
+				onChunk(notifBuffer.removeFirst())
+			}
+		}
+	}
+
+	fun stopNotificationStream() {
+		streamListener = null
+	}
+
 	private val writeTimeoutMs = 10_000L
 	private val timeoutRunnable = Runnable {
 		resultCb?.invoke(false, "Timeout while writing characteristic")
@@ -148,6 +181,14 @@ class BluetoothDeviceManager(private val context: Context) {
 		discovered = false
 		connectedAddress = null
 		lastCharacteristic = null
+		// notify
+        notifyCharacteristic = null
+        notificationsEnabled = false
+		
+		synchronized(notifBuffer) { notifBuffer.clear() }
+		try { notifTimeouts.removeCallbacksAndMessages(null) } catch (_: Throwable) {}
+		notifListener = null
+		
 		closeAfterOp = true
 	}
 
@@ -166,7 +207,7 @@ class BluetoothDeviceManager(private val context: Context) {
 
 		main.post {
 			try {
-				// Do NOT teardown after this; we keep a live GATT for the app session
+				// Do NOT teardown after this - we keep a live GATT for the app session
 				try { gatt?.disconnect() } catch (_: Throwable) {}
 				try { gatt?.close() } catch (_: Throwable) {}
 				gatt = dev.connectGatt(context, /*autoConnect*/ false, persistentGattCb)
@@ -178,23 +219,119 @@ class BluetoothDeviceManager(private val context: Context) {
 		// We return via onServicesDiscovered → succeed()/fail()
 	}
 
-	private val persistentGattCb = object : android.bluetooth.BluetoothGattCallback() {
+	///////////////////////////////
+	// new modified
+	private val persistentGattCb = object : android.bluetooth.BluetoothGattCallback() 
+	{
 		override fun onConnectionStateChange(g: android.bluetooth.BluetoothGatt, status: Int, newState: Int) {
 			if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS &&
 				newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-				g.discoverServices()
+
+				// Prefer faster link for the initial handshake
+				if (android.os.Build.VERSION.SDK_INT >= 21) {
+					try {
+						g.requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+					} catch (_: Throwable) {}
+				}
+
+				// Request a larger MTU so the dongle can send the whole line in one notify
+				if (android.os.Build.VERSION.SDK_INT >= 21) {
+					val ok = try { g.requestMtu(247) } catch (_: Throwable) { false }
+					if (!ok) {
+						// If request failed, proceed anyway
+						g.discoverServices()
+					}
+				} else {
+					g.discoverServices()
+				}
 			} else {
 				fail("Connection state=$newState status=$status")
 			}
 		}
 
-		override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
-			if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
-				discovered = true
-				succeed() // signals connect() completion (do not close)
-			} else {
-				fail("Service discovery failed status=$status")
+        override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
+            if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
+                // Find NUS service + chars
+                val svc = g.getService(BleHub.SERVICE_UUID)
+                lastCharacteristic = svc?.getCharacteristic(BleHub.CHAR_UUID) // TX (write)
+                notifyCharacteristic = svc?.getCharacteristic(BleHub.RX_UUID) // RX (notify)
+
+                if (notifyCharacteristic != null) {
+                    // Enable notifications on RX
+                    g.setCharacteristicNotification(notifyCharacteristic, true)
+                    val cccd = notifyCharacteristic!!.getDescriptor(
+                        java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+                    )
+                    if (cccd != null) {
+                        cccd.value = android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        // Write descriptor; completion handled in onDescriptorWrite
+                        if (!g.writeDescriptor(cccd)) {
+                            // Could not write CCCD; still try to continue
+                            notificationsEnabled = false
+                            succeed()
+                        }
+                    } else {
+                        // No CCCD available; continue anyway
+                        notificationsEnabled = false
+                        succeed()
+                    }
+                } else {
+                    // No RX, but we can still write-only
+                    notificationsEnabled = false
+                    succeed()
+                }
+            } else {
+                fail("Service discovery failed status=$status")
+            }
+        }
+
+        override fun onDescriptorWrite(
+            g: android.bluetooth.BluetoothGatt,
+            descriptor: android.bluetooth.BluetoothGattDescriptor,
+            status: Int
+        ) {
+            if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS &&
+                descriptor.characteristic == notifyCharacteristic) {
+                notificationsEnabled = true
+            }
+            // Signal connect() completion (do not close)
+            succeed()
+        }
+
+		override fun onCharacteristicChanged(
+			g: android.bluetooth.BluetoothGatt,
+			characteristic: android.bluetooth.BluetoothGattCharacteristic
+		) {
+			if (characteristic == notifyCharacteristic) {
+				val data = characteristic.value
+
+				// 1) if a stream is active, deliver there (do NOT consume one-shot)
+				streamListener?.let { streamCb ->
+					streamCb(data)
+					return
+				}
+
+				// 2) otherwise deliver to one-shot waiter if present
+				val cb = notifListener
+				if (cb != null) {
+					notifListener = null
+					try { notifTimeouts.removeCallbacksAndMessages(null) } catch (_: Throwable) {}
+					cb(data)
+				} else {
+					// 3) no one is listening -> buffer for the next waiter
+					synchronized(notifBuffer) { notifBuffer.addLast(data.copyOf()) }
+				}
 			}
+		}
+
+		override fun onMtuChanged(
+			g: android.bluetooth.BluetoothGatt,
+			mtu: Int,
+			status: Int
+		) {
+			currentMtu = mtu
+			// Continue to service discovery after MTU negotiation
+			try { g.discoverServices() } catch (_: Throwable) {}
 		}
 
 		override fun onCharacteristicWrite(
@@ -304,126 +441,25 @@ class BluetoothDeviceManager(private val context: Context) {
 		cleanupGatt()
 	}
 
-
-/* - old function ?
-	////////////////////////////////////////////////
-	// Connects to [address], discovers [serviceUuid], then writes [payload] to [characteristicUuid].
-	// You MUST have BLUETOOTH_CONNECT permission granted when calling this.
-	@android.annotation.SuppressLint("MissingPermission")
-	@androidx.annotation.RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
-	fun connectAndWrite(
-		address: String,
-		payload: ByteArray,
-		serviceUuid: java.util.UUID,
-		characteristicUuid: java.util.UUID,
-		writeType: Int = android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-		onResult: (success: Boolean, error: String?) -> Unit
-	) {
-		// Stop scanning so the controller isn't busy
-		stop()
-
-		val dev = try { adapter?.getRemoteDevice(address) } catch (_: IllegalArgumentException) { null }
-		if (dev == null) {
-			onResult(false, "Invalid device address")
-			return
-		}
-		resultCb = onResult
-
-		// Append newline if the global toggle is ON
-		val actualPayload = if (PreferencesUtil.sendNewLineAfterPassword(context)) {
-			payload + "\n".toByteArray(Charsets.UTF_8)
-		} else {
-			payload
-		}
-
-		// Make sure we run connect on the main thread
-		main.post {
-			try {
-				cleanupGatt()
-				gatt = dev.connectGatt(context, false, object : android.bluetooth.BluetoothGattCallback() {
-					override fun onConnectionStateChange(g: android.bluetooth.BluetoothGatt, status: Int, newState: Int) {
-						if (status != android.bluetooth.BluetoothGatt.GATT_SUCCESS || newState != android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-							fail("Failed to connect (status=$status, state=$newState)")
-							return
-						}
-						g.discoverServices()
-					}
-
-					override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
-						if (status != android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
-							fail("Service discovery failed (status=$status)")
-							return
-						}
-						val service = g.getService(java.util.UUID.fromString(serviceUuid.toString()))
-							?: g.getService(serviceUuid) // double-try if some stacks stringify
-						val ch = service?.getCharacteristic(characteristicUuid)
-						if (ch == null) {
-							fail("Characteristic not found")
-							return
-						}
-
-						// ---- Decide the actual write type to use ----
-						var resolvedWriteType = writeType
-						val props = ch.properties
-						val hasWriteResp = (props and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-						val hasWriteNoResp = (props and android.bluetooth.BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-
-						// If DEFAULT was requested but the characteristic doesn't support response, fall back to NO_RESPONSE
-						if (resolvedWriteType == android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT &&
-							!hasWriteResp && hasWriteNoResp) {
-							resolvedWriteType = android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-						}
-						val isNoResponse = (resolvedWriteType == android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-
-						// ---- Perform the write ----
-						if (android.os.Build.VERSION.SDK_INT >= 33) {
-							val rc = g.writeCharacteristic(ch, actualPayload, resolvedWriteType)
-							if (rc != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
-								fail("writeCharacteristic() rc=$rc")
-								return
-							}
-							if (isNoResponse) {
-								// No callback will arrive: treat as success immediately
-								succeed()
-								return
-							}
-						} else {
-							ch.writeType = resolvedWriteType
-							ch.value = actualPayload
-							if (!g.writeCharacteristic(ch)) {
-								fail("writeCharacteristic() returned false")
-								return
-							}
-							if (isNoResponse) {
-								// Legacy API: no callback for NO_RESPONSE either
-								succeed()
-								return
-							}
-						}
-
-						// We wrote with response → wait for onCharacteristicWrite with a timeout
-						main.removeCallbacks(timeoutRunnable)
-						main.postDelayed(timeoutRunnable, writeTimeoutMs)
-					}
-
-
-					override fun onCharacteristicWrite(
-						g: android.bluetooth.BluetoothGatt,
-						characteristic: android.bluetooth.BluetoothGattCharacteristic,
-						status: Int
-					) {
-						main.removeCallbacks(timeoutRunnable)
-						if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
-							succeed()
-						} else {
-							fail("Write failed (status=$status)")
-						}
-					}
-				})
-			} catch (t: Throwable) {
-				fail("Exception during connect: ${t.message}")
+	// new - wait for notify message
+	fun awaitNextNotification(timeoutMs: Long, onResult: (ByteArray?) -> Unit) 
+	{
+		// if something is already buffered, return it immediately
+		synchronized(notifBuffer) {
+			if (notifBuffer.isNotEmpty()) {
+				onResult(notifBuffer.removeFirst())
+				return
 			}
 		}
-	}	
-	*/
+		// otherwise arm a one-shot listener + timeout
+		notifListener = onResult
+		notifTimeouts.postDelayed({
+			val cb = notifListener
+			notifListener = null
+			cb?.invoke(null) // timeout
+		}, timeoutMs)
+	}
+
+
+
 }

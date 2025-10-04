@@ -57,7 +57,7 @@ open class TextFieldView @JvmOverloads constructor(context: Context,
 		ContextThemeWrapper(context, R.style.KeepassDXStyle_ImageButton_Simple), null, 0
 	).apply {
 		layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
-		// Use any icon you prefer; placeholder here reuses "more" which already exists in the project
+		// larry: Using player media icon for now - perhaps should use a better icon
 		//setImageDrawable(ContextCompat.getDrawable(context, R.drawable.ic_arrow_right_white_24))
 		setImageResource(android.R.drawable.ic_media_next)
 		contentDescription = "Send"

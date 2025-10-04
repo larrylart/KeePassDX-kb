@@ -5,6 +5,12 @@
     <PreferenceCategory
         android:title="@string/label_select_output_device" />
 
+    <!-- NEW: Device Type (stub) -->
+    <com.kunzisoft.keepass.settings.preference.SimpleDropdownPreference
+        android:key="@string/pref_device_type_key"
+        android:title=""
+        app:layout="@layout/pref_row_dropdown_flat" />
+
     <!-- Custom Material row (outlined dropdown + inline switch) -->
     <com.kunzisoft.keepass.settings.preference.OutputDeviceRowPreference
         android:key="pref_output_dongle_row"
@@ -16,6 +22,12 @@
 		android:title="@string/label_bt_pairing"
 		android:summary="@string/btn_connect_summary"
 		app:layout="@layout/pref_row_button_start" />
+		
+    <!-- NEW: Keyboard Layout -->
+    <com.kunzisoft.keepass.settings.preference.SimpleDropdownPreference
+        android:key="@string/pref_keyboard_layout_key"
+        android:title="@string/label_keyboard_layout"
+        app:layout="@layout/pref_row_dropdown" />		
 		
     <!-- "Send new line" option below the row -->
     <SwitchPreferenceCompat
