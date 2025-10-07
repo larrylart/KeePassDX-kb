@@ -60,7 +60,7 @@ You’ll need to **flash the dongle** with that software before using this modif
 You have two options:
 
 1. **Install the unsigned APK**  
-   - Download the release APK from the [Releases](./releases) section.  
+   - Download the release APK from the [Releases](https://github.com/larrylart/KeePassDX-kb/releases) section.  
    - Transfer it to your Android device.  
    - Enable “Install from Unknown Sources” in system settings.  
    - Manually install the APK to test the app.  
