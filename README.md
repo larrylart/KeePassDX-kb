@@ -8,9 +8,9 @@ The purpose of this modification is to extend KeePassDX with the ability to send
 I built a companion project: **USB HID keyboard emulator** running on an ESP32-S3 dongle.  
 The dongle receives key events from KeePassDX over Bluetooth and injects them into the target machine as if typed from a physical keyboard.
 
-# 🚀 What’s New (v1.2.1 Architecture)
+## 🚀 What’s New (v1.2.1 Architecture)
 
-## 🔐 1. MTLS Binary Protocol (Encrypted BLE Channel)
+### 🔐 1. MTLS Binary Protocol (Encrypted BLE Channel)
 
 Communication with the dongle now uses a **custom miniature TLS-like protocol** to provide strong resistance to compromised client devices:
 
@@ -23,7 +23,7 @@ Communication with the dongle now uses a **custom miniature TLS-like protocol** 
 
 ---
 
-## 🔑 2. Secure Password-Based APPKEY Provisioning
+### 🔑 2. Secure Password-Based APPKEY Provisioning
 
 First-time pairing now follows a secure challenge–response flow:
 
@@ -38,7 +38,7 @@ APPKEY provisioning happens only once limited to only one device/app.
 
 ---
 
-## 🔁 3. Multi-Dongle Support (Multi-Key)
+### 🔁 3. Multi-Dongle Support (Multi-Key)
 
 The app now fully supports multiple dongles:
 
@@ -53,7 +53,7 @@ The app now fully supports multiple dongles:
 > ⚠️ **Note:**  
 > Make sure you use the latest version dongle firmware version (v1.2.1+) [blue_keyboard repository](https://github.com/larrylart/blue_keyboard/) 
 
-### Hardware
+## Hardware
 
 The hardware used is the **LILYGO T-Dongle-S3 ESP32-S3 TTGO Development Board**, which features:
 
