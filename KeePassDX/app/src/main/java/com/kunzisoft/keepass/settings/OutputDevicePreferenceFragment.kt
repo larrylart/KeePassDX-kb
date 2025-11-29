@@ -1,8 +1,27 @@
 ////////////////////////////////////////////////////////////////////
-// Larry note: some of the functionality in here, specific to blue_keyboard might 
-// need to move to separate class
+// OutputDevicePreferenceFragment
+//
+// Settings screen responsible for:
+//
+//  - Listing nearby BLE devices (via BluetoothDeviceManager)
+//  - Showing current selection + pairing state
+//  - Letting the user toggle "Use external keyboard device" on/off
+//  - Handling pairing/unpairing
+//  - Initiating BleHub "connect + handshake" from the Settings screen
+//  - Providing a password prompt UI for APPKEY provisioning
+//  - Updating the keyboard layout on the dongle (binary MTLS C0/C1/C2 ops)
+//
+// This fragment is the **UI layer**; all BLE logic happens in:
+//     BluetoothDeviceManager  – GATT + scanning
+//     BleHub                  – provisioning + MTLS + command API
+//
+// NOTE: A large portion of the logic in this file is tightly coupled
+//       to BlueKeyboard firmware. Some of it may eventually belong
+//       in a dedicated UI-helper class.
+//
+// IMPORTANT: Settings-based connects **allowPrompt = true**, while
+//            app-start auto-connects do *not* show password dialogs.
 ////////////////////////////////////////////////////////////////////
-
 package com.kunzisoft.keepass.settings
 
 import android.Manifest
@@ -29,7 +48,10 @@ import com.kunzisoft.keepass.settings.preference.SimpleDropdownPreference
 import android.os.Handler
 import android.os.Looper
 
-class OutputDevicePreferenceFragment : NestedSettingsFragment() {
+import android.util.Log
+
+class OutputDevicePreferenceFragment : NestedSettingsFragment() 
+{
 
     private lateinit var manager: BluetoothDeviceManager
 
@@ -47,29 +69,96 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> refreshStart() }
 
-    private val bondReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            if (BluetoothDevice.ACTION_BOND_STATE_CHANGED == intent.action) {
-                try { manager.refreshBonded() } catch (_: SecurityException) {}
-                updateActionRow(PreferencesUtil.getOutputDeviceId(requireContext()))
-            }
-        }
-    }
+	////////////////////////////////////////////////////////////////////
+	// Receiver for system bond-state changes.
+	// - Refreshes the device list when bonding transitions
+	// - Updates UI for selected device
+	// - If the *selected* device becomes BONDED, automatically triggers
+	//   a Settings-grade connect (BleHub.connectFromSettings),
+	//   which may show password prompts if provisioning is needed.
+	////////////////////////////////////////////////////////////////////
+	private val bondReceiver = object : BroadcastReceiver() {
+		override fun onReceive(context: Context, intent: Intent) {
+			if (BluetoothDevice.ACTION_BOND_STATE_CHANGED != intent.action) return
+
+			val dev = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+			val was = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.BOND_NONE)
+			val now = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+
+			// keep your UI refresh
+			try { manager.refreshBonded() } catch (_: SecurityException) {}
+			updateActionRow(PreferencesUtil.getOutputDeviceId(requireContext()))
+
+			// NEW: when selected device just became BONDED, run the Settings connect (allowPrompt = true)
+			val selected = PreferencesUtil.getOutputDeviceId(requireContext())
+			if (dev.address == selected && was != BluetoothDevice.BOND_BONDED && now == BluetoothDevice.BOND_BONDED) {
+				BleHub.connectFromSettings { ok, err ->
+					// optional: feedback
+					if (!ok) {
+						Toast.makeText(requireContext(), err ?: "Failed to connect", Toast.LENGTH_SHORT).show()
+					}
+				}
+			}
+		}
+	}
 
 	private fun postUI(block: () -> Unit) {
 		if (Looper.myLooper() == Looper.getMainLooper()) block()
 		else Handler(Looper.getMainLooper()).post(block)
 	}
 
+	////////////////////////////////////////////////////////////////////
+	// onCreateScreenPreference
+	//
+	// Main initialization of the settings screen:
+	//
+	//   1. Inject password dialog provider into BleHub (MUST happen early)
+	//   2. Load preferences (device type, selected device, layout, toggle)
+	//   3. Initialize BluetoothDeviceManager
+	//   4. Set up all UI callbacks:
+	//        - toggle changed
+	//        - device selected from dropdown
+	//        - layout changed
+	//        - pair/unpair button
+	//
+	// This is the main glue between Settings UI <-> BLE control/hub logic.
+	////////////////////////////////////////////////////////////////////
     override fun onCreateScreenPreference(
         screen: Screen,
         savedInstanceState: Bundle?,
         rootKey: String?
     ) {
+		// ensure BleHub holds app context + has a password prompt EARLY
+		BleHub.init(requireContext())
+
+		// Register a UI callback for BleHub that can show a password dialog.
+		// BleHub will call this when APPKEY provisioning requires user input.
+		// MUST be registered before any connectFromSettings() triggers, or
+		// you'll get crashes / "prompt is null" paths.
+		BleHub.setPasswordPrompt { _, reply ->
+			postUI {
+				//Log.d("BleHub", "DEBUG: passwordPrompt UI callback invoked, showing dialog")
+
+				val activity = requireActivity()
+				val edit = android.widget.EditText(activity).apply {
+					inputType = android.text.InputType.TYPE_CLASS_TEXT or
+								android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+					hint = "App password"
+				}
+				androidx.appcompat.app.AlertDialog.Builder(activity)
+					.setTitle("Secure the dongle")
+					.setMessage("Enter the dongle password")
+					.setView(edit)
+					.setPositiveButton("OK") { _, _ -> reply(edit.text.toString().toCharArray()) }
+					.setNegativeButton("Cancel") { _, _ -> reply(null) }
+					.show()
+			}
+		}		
+		
         setPreferencesFromResource(R.xml.preferences_output_device, rootKey)
         manager = BluetoothDeviceManager(requireContext())
 
-        // --- Device Type (stub) ---
+		// Device type selector (currently only "Blue KB"). Stored in prefs for future extensibility (multiple device types).
         deviceTypePref = requireNotNull(findPreference(getString(R.string.pref_device_type_key)))
         val deviceTypeEntries = listOf(getString(R.string.device_type_blue_kb))
         val deviceTypeValues  = listOf("BLUE_KB")
@@ -80,18 +169,14 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
             PreferencesUtil.setDeviceType(requireContext(), value)
         }
 
+		// rowPref: dropdown of discovered devices + on/off switch
+		// actionPref: left-side "Pair / Unpair / Connect" button
+		// layoutPref: keyboard layout selector (sent via binary C0 -> ACK)
         rowPref = requireNotNull(findPreference("pref_output_dongle_row"))
-        //actionPref = requireNotNull(findPreference(KEY_ACTION))
 		actionPref = requireNotNull(findPreference<ActionButtonStartPreference>(KEY_ACTION))
 
-        // Initial enable state from global setting
-        //val enabled = PreferencesUtil.useExternalKeyboardDevice(requireContext())
-        //rowPref.setSwitchChecked(enabled)
-        //actionPref.isEnabled = enabled
-
-
 		//////////////////////////
-        // --- Keyboard Layout ---
+        // Keyboard Layout 
         layoutPref = requireNotNull(findPreference(getString(R.string.pref_keyboard_layout_key)))
 
 		// set my value for keyboard layout 
@@ -108,29 +193,27 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 		deviceTypePref.isEnabled = enabled
 		layoutPref.isEnabled = enabled
 		rowPref.setDropdownEnabled(enabled)
-
-
-        // Enable/disable dropdowns along with the main toggle
-        //val enabled_kbl = PreferencesUtil.useExternalKeyboardDevice(requireContext())
-        //deviceTypePref.isEnabled = enabled_kbl
-        //layoutPref.isEnabled = enabled_kbl
-
-
-        // Toggle persists via PreferencesUtil and gates the row/action
-        /*rowPref.onToggleChanged = { isChecked ->
-            PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), isChecked)
-            rowPref.setDropdownEnabled(isChecked)
-            actionPref.isEnabled = isChecked
-			
-			// if user disables output device, drop the BLE link immediately
-			if (!isChecked) {
-				BleHub.disconnect()
-			}			
-        }*/
 		
-		// NEW onToggleChanged to handle connect not just disconnect
-		rowPref.onToggleChanged = { isChecked ->
-			PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), isChecked)
+		/////////
+		// :: Master toggle: "Use External Keyboard Device"
+		//
+		// OFF:
+		//   - Persist OFF in prefs immediately
+		//   - Clear disabled-by-error flag
+		//   - Drop any active BLE link (BleHub.disconnect())
+		//   - Disable all related UI widgets
+		//
+		// ON:
+		//   - Requires a selected device; otherwise reverts toggle
+		//   - Runs BleHub.connectFromSettings() (full MTLS handshake)
+		//   - On failure: revert toggle/state
+		//   - On success:
+		//       - persist ON in prefs
+		//       - clear disabled-by-error
+		//       - query layout from dongle (C1-C2)
+		//       - update UI accordingly
+		////////////////////////////////////////////
+		rowPref.onToggleChanged = { isChecked ->		
 
 			// keep UI in sync with master toggle
 			rowPref.setDropdownEnabled(isChecked)
@@ -138,49 +221,85 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 			deviceTypePref.isEnabled = isChecked
 			layoutPref.isEnabled = isChecked
 
-			if (!isChecked) {
+			if (!isChecked) 
+			{
+				// Persist OFF immediately
+				PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), false)
+                PreferencesUtil.setOutputDeviceDisabledByError(requireContext(), false)
+				
 				// turned OFF - drop any live BLE link
 				BleHub.disconnect()
-			} else {
+				
+			} else 
+			{
 				// turned ON - try to connect+handshake to the currently selected device
 				val addr = PreferencesUtil.getOutputDeviceId(requireContext())
-				if (addr.isNullOrBlank()) {
-					Toast.makeText(requireContext(), R.string.msg_no_device_selected, Toast.LENGTH_SHORT).show()
-				} else 
+				if (addr.isNullOrBlank()) 
 				{
-					BleHub.connectAndFetchLayoutSimple(timeoutMs = 2500L) { ok, _ ->
+					Toast.makeText(requireContext(), R.string.msg_no_device_selected, Toast.LENGTH_SHORT).show()
+					// Revert UI since we can’t connect without a device
+					rowPref.setSwitchChecked(false)
+					rowPref.setDropdownEnabled(false)
+					actionPref.isEnabled = false
+					deviceTypePref.isEnabled = false
+					layoutPref.isEnabled = false
+					
+				} else 
+				{				
+					//BleHub.connectAndEstablishSecure { ok, _ ->					
+					BleHub.connectFromSettings { ok, _ ->
 						postUI {
-							if (!ok) {
-								Toast.makeText(requireContext(),
-									R.string.msg_failed_connect_device,
-									Toast.LENGTH_SHORT
-								).show()
+							if (!ok) 
+							{
+								Toast.makeText(requireContext(), R.string.msg_failed_connect_device, Toast.LENGTH_SHORT).show()
+                                // keep prefs + UI consistent on failure
+                                //??PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), false)
+								
+                                rowPref.setSwitchChecked(false)
+                                actionPref.isEnabled = false
+                                deviceTypePref.isEnabled = false
+                                layoutPref.isEnabled = false
+								
 							} else 
 							{
-								// Ensure UI thread for preference UI updates
-								val newLayout = PreferencesUtil.getKeyboardLayout(requireContext())
-								if (!newLayout.isNullOrBlank()) {
-									layoutPref.setSelectedValue(newLayout)
-								}								
+								// Persist ON after success (prevents silent auto-connect race)
+								PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), true)
+								PreferencesUtil.setOutputDeviceDisabledByError(requireContext(), false)
+								
+								// ask device which layout it uses now (binary C1-C2)
+								BleHub.getLayout { okL, layoutId, _ ->
+									postUI {
+										if (okL && layoutId != null) {
+											// store & reflect in UI (map your numeric id to saved string if needed)
+											// If you're already storing a string code, keep the existing prefs flow:
+											val saved = PreferencesUtil.getKeyboardLayout(requireContext())
+											if (!saved.isNullOrBlank()) layoutPref.setSelectedValue(saved)
+										}
+									}
+								}
 							}
 						}
 					}
+					
 				}
 			}
 		}
-
-		// end of new change
-
-        // Selection persists via PreferencesUtil and updates the action row
-        /*rowPref.onDeviceSelected = { address, _label ->
-            val name = manager.devices.value.orEmpty()
-                .firstOrNull { it.address == address }?.name.orEmpty()
-            PreferencesUtil.setOutputDeviceId(requireContext(), address)
-            PreferencesUtil.setOutputDeviceName(requireContext(), name)
-            updateActionRow(address)
-        }*/
 		
-		// NEW onDeviceSelected - to connect/disconnect to selected devices
+		////////////
+		// :: onDeviceSelected
+		//
+		// When user picks a device from the dropdown:
+		//
+		//   1. Persist selection (address + name)
+		//   2. Update "pair/unpair/connect" action button
+		//   3. If feature is enabled:
+		//         - Drop any existing session
+		//         - Connect + MTLS-handshake the newly selected device
+		//         - Sync layout from device (C1-C2)
+		//         - Persist enablement flags
+		//
+		// THIS is the path used when manually selecting or switching devices.
+		//////////////////////////////////////////////////////////
 		rowPref.onDeviceSelected = { address, _label ->
 			val name = manager.devices.value.orEmpty()
 				.firstOrNull { it.address == address }?.name.orEmpty()
@@ -196,46 +315,48 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 				BleHub.disconnect()
 
 				// 2) Connect + read layout via the same handshake used elsewhere
-				BleHub.connectAndFetchLayoutSimple(timeoutMs = 2500L) { ok, _ ->
+				BleHub.connectFromSettings { ok, _ ->
 					postUI {
-						if (!ok) {
+						if (!ok) 
+						{
 							Toast.makeText(requireContext(), R.string.msg_failed_connect_device, Toast.LENGTH_SHORT).show()
-						} else {
-							// Ensure UI thread for preference UI updates							
-							val newLayout = PreferencesUtil.getKeyboardLayout(requireContext())
-							if (!newLayout.isNullOrBlank()) {
-								layoutPref.setSelectedValue(newLayout)
-							}							
+							
+                            rowPref.setSwitchChecked(false)
+                            actionPref.isEnabled = false
+                            deviceTypePref.isEnabled = false
+                            layoutPref.isEnabled = false
+							
+						} else 
+						{
+							PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), true)
+							PreferencesUtil.setOutputDeviceDisabledByError(requireContext(), false)
+							
+							BleHub.getLayout { okL, layoutId, _ ->
+								postUI {
+									if (okL && layoutId != null) {
+										val saved = PreferencesUtil.getKeyboardLayout(requireContext())
+										if (!saved.isNullOrBlank()) layoutPref.setSelectedValue(saved)
+									}
+								}
+							}
 						}
 					}
 				}
+								
 			}
-		}
-        
-		/* duplicate ? why... test and cleanup
-		rowPref.onToggleChanged = { isChecked ->
-            PreferencesUtil.setUseExternalKeyboardDevice(requireContext(), isChecked)
-            rowPref.setDropdownEnabled(isChecked)
-            actionPref.isEnabled = isChecked
-            deviceTypePref.isEnabled = isChecked
-            layoutPref.isEnabled = isChecked
-            if (!isChecked) {
-                com.kunzisoft.keepass.receivers.BleHub.disconnect()
-            }
-        }
+		}        
 
-        // When device changes, keep the dropdowns enabled/disabled in sync
-        rowPref.onDeviceSelected = { address, _label ->
-            val name = manager.devices.value.orEmpty()
-                .firstOrNull { it.address == address }?.name.orEmpty()
-            PreferencesUtil.setOutputDeviceId(requireContext(), address)
-            PreferencesUtil.setOutputDeviceName(requireContext(), name)
-            updateActionRow(address)
-        }
-		*/
-
-		///////////////////
-        // On Keyboard Layout select: send "C:SET:LAYOUT=VALUE\n" and await "R:OK"
+		/////////////
+		// :: Keyboard layout selector (string code)
+		//
+		// User chooses a layout (e.g. "UK_WINLIN").
+		//
+		// Sends the layout string via secure MTLS command:
+		//      C0(payload=layoutString) - expects ACK(0x00)
+		//
+		// On success: store & reflect in UI
+		// On failure: revert UI, show error
+		//////////////////////////////////////////////////////////////
 		layoutPref.onSelected = { value, _ ->
 			val ctx = requireContext()
 			val prev = PreferencesUtil.getKeyboardLayout(ctx)
@@ -246,33 +367,29 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 				// revert UI immediately
 				layoutPref.setSelectedValue(prev)
 			} else {
-				// Build command with newline
-				val cmd = "C:SET:LAYOUT=$value\n"
 
-				// Fire command then wait for a single notification "R:OK"
-				BleHub.sendCommandAwaitOk(cmd) { ok, err ->
-					if (ok) {
-						postUI {
+				// value is your string code (e.g. "UK_WINLIN")
+				// Send the string to the dongle and wait for ACK(0x00)
+				BleHub.setLayoutString(value) { ok, err ->
+					postUI {
+						if (ok) {
 							PreferencesUtil.setKeyboardLayout(ctx, value)
 							Toast.makeText(ctx, R.string.msg_layout_set_ok, Toast.LENGTH_SHORT).show()
-						}
-					} else {
-						postUI {
-							// Revert UI to previous value
+						} else {
+							// revert UI to previous selection
 							layoutPref.setSelectedValue(prev)
 							val msg = if (err.isNullOrBlank()) getString(R.string.msg_layout_set_failed)
 									  else getString(R.string.msg_layout_set_failed) + ": " + err
 							Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
 						}
 					}
-				}
+				}				
 			}
 		}
 
-
 		/////////////////
         // Preload saved selection into the row/action visibility
-        val saved = PreferencesUtil.getOutputDeviceId(requireContext())
+        val saved = PreferencesUtil.getOutputDeviceId(requireContext())		
         updateActionRow(saved)
 
 		// Pair/unpair click (row tap)
@@ -288,6 +405,14 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 
     }
 
+	////////////////////////////////////////////////////////////////////
+	// Handles pair/unpair from both:
+	//   - actionPref row tap
+	//   - action button click
+	//
+	// manager.pair/unpair() uses platform APIs / reflection.
+	// Shows a toast for success/failure.
+	////////////////////////////////////////////////////////////////////
 	private fun handlePairUnpairClick() {
 		val addr = PreferencesUtil.getOutputDeviceId(requireContext()).orEmpty()
 		if (addr.isBlank()) {
@@ -309,7 +434,16 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 		}
 	}
 
-
+	////////////////////////////////////////////////////////////////////
+	// onStart()
+	//
+	//  - Request missing Bluetooth permissions
+	//  - Start scanning once permissions are granted
+	//  - Register bond receiver
+	//  - Sync UI components (layout selector, main toggle)
+	//
+	// NOTE: BleHub passwordPrompt *must* already be set earlier.
+	////////////////////////////////////////////////////////////////////
     override fun onStart() {
         super.onStart()
         val perms = neededPermissions()
@@ -322,13 +456,32 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 		if (!current.isNullOrBlank()) {
 			postUI { layoutPref.setSelectedValue(current) }
 		}
-	
+		
+		// NEW: refresh switch state from prefs in case it was flipped by startup policy
+		val enabled = PreferencesUtil.useExternalKeyboardDevice(requireContext())
+		rowPref.setSwitchChecked(enabled)
+		actionPref.isEnabled = enabled
+		deviceTypePref.isEnabled = enabled
+		layoutPref.isEnabled = enabled	
     }
 
+	////////////////////////////////////////////////////////////////////
+	// onStop()
+	//  - Unregister bond receiver
+	//  - Stop BLE scan
+	//  - Remove BleHub password prompt (avoids leaking UI context)
+	//
+	// IMPORTANT: If we leave this screen while a provisioning flow is
+	//           active, BleHub will no longer be allowed to show dialogs.
+	////////////////////////////////////////////////////////////////////
     override fun onStop() {
         super.onStop()
         try { requireContext().unregisterReceiver(bondReceiver) } catch (_: Exception) {}
         manager.stop()
+		
+		// IMPORTANT: remove the provider when we leave this screen
+		BleHub.clearPasswordPrompt()
+	
     }
 
     private fun refreshStart() {
@@ -340,6 +493,11 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
         manager.start()
     }
 
+	////////////////////////////////////////////////////////////////////
+	// Populate dropdown entries from manager.devices LiveData.
+	// Entries contain device name + address + paired marker.
+	// Also ensures the action button visibility matches selection.
+	////////////////////////////////////////////////////////////////////
     private fun populateRow(list: List<BtDevice>) {
         val entries = list.map { labelFor(it) }
         val values  = list.map { it.address }
@@ -351,10 +509,17 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 
     private fun labelFor(d: BtDevice): String {
         val name = d.name.ifBlank { getString(R.string.label_unknown_device) }
-        val star = if (d.bonded) " •paired" else ""
+        val star = if (d.bonded) " -paired" else ""
         return "$name (${d.address})$star"
     }
 
+	////////////////////////////////////////////////////////////////////
+	// Updates the left-side button (pair/unpair/connect) based on:
+	//   - whether a device is selected
+	//   - whether that device is bonded
+	//
+	// actionPref.paired toggles the button label + icon dynamically.
+	////////////////////////////////////////////////////////////////////
     private fun updateActionRow(address: String?) {
         val hasSel = !address.isNullOrBlank()
         actionPref.isVisible = hasSel
@@ -382,8 +547,22 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
             arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
-	
-	// compact list of value labels for keyboard layout
+
+	////////////////////////////////////////////////////////////////////	
+	// Returns (labels, values) for all supported keyboard layouts.
+	// values  = short codes sent to firmware
+	// labels  = human-readable strings shown in UI
+	//
+	// The list includes:
+	//   - UK, IE, US, DE, FR, ES, IT
+	//   - PT-PT, PT-BR
+	//   - Nordics (SE, NO, DK, FI)
+	//   - Swiss variants
+	//   - Turkey
+	//
+	// Order matters for dropdown readability.
+	// TODO: maybe create a command that will fetch the available layout from dongle
+	////////////////////////////////////////////////////////////////////
 	private fun keyboardLayoutOptions(): Pair<List<String>, List<String>> 
 	{
 		// value - label 
@@ -435,6 +614,19 @@ class OutputDevicePreferenceFragment : NestedSettingsFragment() {
 // end of class	
 }
 
+////////////////////////////////////////////////////////////////////
+// ActionButtonStartPreference
+//
+// Custom Preference that shows a MaterialButton inside a settings row.
+//
+// Used for: Pair / Unpair / Connect button in Output Device settings.
+//
+// Properties:
+//   paired: toggles button label between "Unpair" / "Pair"
+//   onButtonClick: callback invoked when button pressed
+//
+// onBindViewHolder updates the button label + listener dynamically.
+////////////////////////////////////////////////////////////////////
 class ActionButtonStartPreference @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : Preference(context, attrs) {

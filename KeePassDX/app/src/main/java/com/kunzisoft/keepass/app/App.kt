@@ -43,7 +43,8 @@ class App : MultiDexApplication() {
 
         Stylish.load(this)
 		
-		BleHub.init(this)
+		 // Initialize BLE hub globally
+		BleHub.init(this)			
     }
 }
 

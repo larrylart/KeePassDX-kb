@@ -769,6 +769,21 @@ object PreferencesUtil {
 		return prefs.getBoolean(key, def)
 	}
 	
+	// just a flag to handle disabled key by error
+    private const val KEY_OUTPUT_DISABLED_BY_ERROR = "pref_output_disabled_by_error"
+
+    fun setOutputDeviceDisabledByError(context: Context, value: Boolean) {
+        PreferenceManager.getDefaultSharedPreferences(context)
+            .edit()
+            .putBoolean(KEY_OUTPUT_DISABLED_BY_ERROR, value)
+            .apply()
+    }
+
+    fun wasOutputDeviceDisabledByError(context: Context): Boolean {
+        return  PreferenceManager.getDefaultSharedPreferences(context)
+            .getBoolean(KEY_OUTPUT_DISABLED_BY_ERROR, false)
+    }	
+	
 	// Returns true if "Send new line" is ON in Settings > Output devices
 	fun sendNewLineAfterPassword(context: Context): Boolean {
 		val prefs = PreferenceManager.getDefaultSharedPreferences(context)
@@ -803,8 +818,7 @@ object PreferencesUtil {
             apply()
         }
     }
-	
-	
+		
 	// end of Larry's add
 	/////////
 
