@@ -777,8 +777,8 @@ class BluetoothDeviceManager(private val context: Context)
 
         // Fast path: reuse existing live GATT to same address if available;
         // otherwise, connect first and then perform the write.
-		//if (gatt != null && connectedAddress == address && discovered) {
-		if (gatt != null && connectedAddress == address) {
+		if (gatt != null && connectedAddress == address && discovered) {
+		//if (gatt != null && connectedAddress == address) {
 			doWrite.invoke()
 		} else {
 			connect(address) { ok, err ->
