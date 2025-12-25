@@ -51,7 +51,7 @@ open class TextFieldView @JvmOverloads constructor(context: Context,
     private var showButtonId = ViewCompat.generateViewId()
     private var copyButtonId = ViewCompat.generateViewId()
 
-	// Add below copyButton declaration
+	// larry: add send button
 	private val sendButtonId = ViewCompat.generateViewId()
 	val sendButton = AppCompatImageButton(
 		ContextThemeWrapper(context, R.style.KeepassDXStyle_ImageButton_Simple), null, 0

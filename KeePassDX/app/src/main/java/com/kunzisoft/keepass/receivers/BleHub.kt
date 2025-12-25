@@ -51,22 +51,6 @@ private fun loge(msg: String, tr: Throwable? = null) {
     }
 }
 
-// Plain-text "unprovisioned" banner parser.
-//
-// When the dongle is not provisioned, it sends an ASCII line like:
-//   LAYOUT=US_WINLIN; PROTO=1.2; FW=1.2.1
-//
-// This is used to:
-//   - detect unprovisioned state (no APPKEY yet)
-//   - pick up the dongle's preferred keyboard layout
-//   - show protocol/firmware versions in logs or UI.
-private val plainInfoRx = Regex("""\bLAYOUT=([A-Z0-9_]+);\s*PROTO=([0-9.]+);\s*FW=([0-9.]+)\b""")
-private fun parsePlainInfo(bytes: ByteArray): Triple<String,String,String>? {
-    val s = bytes.toString(Charsets.UTF_8)
-    val m = plainInfoRx.find(s) ?: return null
-    return Triple(m.groupValues[1], m.groupValues[2], m.groupValues[3])
-}
-
 // Micro-TLS (MTLS) client state for the active session.
 //
 //  sid     : 32-bit session id negotiated during B0/B1/B2.
@@ -75,7 +59,15 @@ private fun parsePlainInfo(bytes: ByteArray): Triple<String,String,String>? {
 private data class MtlsState(
     var sid: Int = 0,
     var sessKey: ByteArray? = null,
-    var seqOut: Int = 0
+
+    // derived keys (match dongle: ENC/MAC/IVK)
+    var kEnc: ByteArray? = null,
+    var kMac: ByteArray? = null,
+    var kIv:  ByteArray? = null,
+
+    // B3 counters
+    var seqOut: Int = 0,   // client->dongle
+    var seqIn:  Int = 0    // dongle->client (replay protection)
 )
 
 private var mtls: MtlsState? = null
@@ -98,6 +90,26 @@ object BleHub
     private val _connected = MutableLiveData(false)
     val connected: LiveData<Boolean> = _connected
 
+	// avoid auto reconnect when disconnecting
+	@Volatile private var suppressAutoConnectUntilMs: Long = 0L
+
+	fun suppressAutoConnectFor(ms: Long) {
+		suppressAutoConnectUntilMs = android.os.SystemClock.elapsedRealtime() + ms
+	}
+
+	// True when GATT link is connected (transport). This is NOT "secure MTLS ready".
+	val bleConnected = MutableLiveData(false)
+	private fun setBleUp(isUp: Boolean) {
+		bleConnected.postValue(isUp)
+
+		if (!isUp) {
+			// BLE transport is down => secure session is invalid
+			_connected.postValue(false)
+			mtls = null
+			fastKeysSessionEnabled = false
+		}
+	}
+	
 	// Tracks whether BleHub is currently running a heavy connect/handshake flow,
 	// e.g. autoConnectFromPrefs() or connectAndEstablishSecure().
 	@Volatile
@@ -226,6 +238,13 @@ object BleHub
     fun autoConnectFromPrefs(onReady: ((Boolean, String?) -> Unit)? = null) {
         val useExt = PreferencesUtil.useExternalKeyboardDevice(appCtx)
         val wasErrorOff = PreferencesUtil.wasOutputDeviceDisabledByError(appCtx)
+
+		// chekc if auto connected disabled - usually by a requested disconnect
+		val now = android.os.SystemClock.elapsedRealtime()
+		if (now < suppressAutoConnectUntilMs) {
+			onReady?.invoke(false, "Auto-connect suppressed")
+			return
+		}
 
 		fun autoDone(ok: Boolean, msg: String?) {
 			connectInProgress = false
@@ -487,8 +506,7 @@ object BleHub
 	// It:
 	//   1) Connects to the selected device from prefs.
 	//   2) Ensures notifications are enabled.
-	//   3) Waits for either a plaintext INFO banner (unprovisioned)
-	//      OR a B0 frame (provisioned).
+	//   3) Waits for a B0 frame (provisioned).
 	//   4) For B0 => run binary handshake (MTLS).
 	//      For plaintext => start provisioning flow if allowed.
 	////////////////////////////////////////////////////////////////////
@@ -543,18 +561,53 @@ object BleHub
     ) {
         fun attempt(left: Int) {
 			logd("CONNECT: attempt left=$left to $address (connectTimeoutMs=$connectTimeoutMs)")
+			
+			// not a great idea 
+			//_connected.postValue(false)
+			//mtls = null
+			//fastKeysSessionEnabled = false			
+			
+			// If bonding is currently in progress, delay a bit to avoid racing pairing UI.
+			val bondState = try {
+				val btMgr = appCtx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+				val adapter = btMgr?.adapter
+				val device = adapter?.getRemoteDevice(address)
+				device?.bondState ?: android.bluetooth.BluetoothDevice.BOND_NONE
+			} catch (_: Throwable) {
+				android.bluetooth.BluetoothDevice.BOND_NONE
+			}
+
+			if (bondState == android.bluetooth.BluetoothDevice.BOND_BONDING) {
+				logd("CONNECT: bonding in progress; delaying connect attempt 700ms")
+				mainHandler.postDelayed({ attempt(left) }, 700L)
+				return
+			}	
+			
             ensureMgr().connect(address, connectTimeoutMs) { ok, err ->
 				logd("CONNECT: connect() callback for $address ok=$ok err=$err")
+				if (ok) setBleUp(true) else setBleUp(false)
                 if (!ok) {
                     if (left > 0) {
 						logd("CONNECT: transport failed, retrying (left=${left - 1}) err=$err")
                         attempt(left - 1)
                     } else {
                         // Transport failed after retries
-                        if (!allowPrompt && !suppressAutoDisable) {
-                            // Startup/autoconnect policy: flip off autoconnect
-                            disableAutoConnect("Output device is not responding.")
-                        }
+						// check in pairing/ not paired/ to be paired
+						/*
+						val isBonded = try {
+							val btMgr = appCtx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+							val adapter = btMgr?.adapter
+							adapter?.getRemoteDevice(address)?.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED
+						} catch (_: Throwable) { true }
+
+						if (isBonded && !allowPrompt && !suppressAutoDisable) {
+							disableAutoConnect("Output device is not responding.")
+						}
+						*/
+						if (!allowPrompt && !suppressAutoDisable) {
+							disableAutoConnect("Output device is not responding.")
+						}
+						
                         onDone?.invoke(false, err)
                     }
                     return@connect
@@ -563,144 +616,110 @@ object BleHub
 				logd("CONNECT: GATT OK for $address, enabling notifications…")
                 ensureNotificationsEnabled(address) { _, _ ->
 
-                    val hasAppKey = BleAppSec.getKey(appCtx, address) != null
-                    val bannerTimeout = if (hasAppKey) 5000L else timeoutMs
-
                     // wait for EITHER plaintext INFO (unprovisioned) OR B0 (provisioned)
-                    waitForInfoBannerOrB0(totalTimeoutMs = bannerTimeout) { plain, b0 ->
-                        when {
-                            b0 != null -> {
-                                logd("CONNECT: got B0 - binary handshake")
-                                doBinaryHandshakeFromB0(address, b0) { okH, errH ->
-                                    _connected.postValue(okH)
-									
-									// used befor in single provisioning mode
-                                    //if (!okH && errH == "APPKEY missing" && !suppressAutoDisable) {
-                                    //    disableAutoConnect("Device requires pairing reset (APPKEY missing).")
-                                    //}
-                                    //onDone?.invoke(okH, errH)
-									
-                                    if (okH) {
-                                        onDone?.invoke(true, null)
-                                        return@doBinaryHandshakeFromB0
-                                    }
+					val hasAppKey = BleAppSec.getKey(appCtx, address) != null
+					val b0Timeout = if (hasAppKey) 5000L else timeoutMs
 
-									// 1) Device has APPKEY, this app instance does not => "APPKEY missing".
-									//    - From Settings (allowPrompt=true): run GET_APPKEY flow + reconnect.
-									//    - From auto-connect: keep old behaviour (may disable autoconnect).
-									if (errH == "APPKEY missing") {
-										if (allowPrompt) {
-											logd("CONNECT: APPKEY missing – provisioning from Settings…")
+					waitForB0(totalTimeoutMs = b0Timeout) { b0 ->
+						if (b0 == null) {
+							// no B0 within timeout
+							if (left > 0) {
+								ensureMgr().disconnect()
+								setBleUp(false) 
+								attempt(left - 1)
+							} else {
+								setBleUp(false)
+								onDone?.invoke(false, "No B0")
+							}
+							return@waitForB0
+						}
 
-											// Ask password, GET_APPKEY, store in BleAppSec
-											requestAndStoreAppKeyWithPrompt(address, forcePrompt = true) { okKey, errKey ->
-												if (!okKey) {
-													onDone?.invoke(false, errKey ?: "APPKEY provisioning failed")
-													return@requestAndStoreAppKeyWithPrompt
-												}
+						// --- Simplified protocol decision point ---
+						val keyNow = BleAppSec.getKey(appCtx, address)
 
-												// After provisioning, reconnect and redo B0/B1/B2
-												reconnectExpectingB0AndHandshake { okH2, errH2 ->
-													_connected.postValue(okH2)
-													onDone?.invoke(okH2, errH2)
-												}
-											}
-										} else if (!suppressAutoDisable) {
-											// Startup/autoconnect path: keep your old policy
-											disableAutoConnect("Device requires pairing reset (APPKEY missing).")
-											onDone?.invoke(false, errH)
-										} else {
-											onDone?.invoke(false, errH)
-										}
-										return@doBinaryHandshakeFromB0
+						if (keyNow == null) {
+							// No local APPKEY => provisioning path
+							if (!allowPrompt) {
+								if (!suppressAutoDisable) {
+									disableAutoConnect("No APPKEY for this device (provisioning required).")
+								}
+								onDone?.invoke(false, "APPKEY missing")
+								return@waitForB0
+							}
+
+							logd("CONNECT: no local APPKEY – provisioning from Settings…")
+							requestAndStoreAppKeyWithPrompt(address, forcePrompt = true) { okKey, errKey ->
+								if (!okKey) {
+									onDone?.invoke(false, errKey ?: "APPKEY provisioning failed")
+									return@requestAndStoreAppKeyWithPrompt
+								}
+
+								// After provisioning, reconnect and redo B0/B1/B2
+								reconnectExpectingB0AndHandshake { okH2, errH2 ->
+									_connected.postValue(okH2)
+									onDone?.invoke(okH2, errH2)
+								}
+							}
+							return@waitForB0
+						}
+
+						// Have a key => handshake from this B0
+						logd("CONNECT: got B0 - binary handshake")
+						doBinaryHandshakeFromB0(address, b0) { okH, errH ->
+							_connected.postValue(okH)
+
+							if (okH) {
+								onSecureSessionReady(address, onDone)
+								return@doBinaryHandshakeFromB0
+							}
+
+							// BADMAC => clear key, reprovision, reconnect, handshake again
+							if (allowPrompt && (errH?.contains("BADMAC") == true)) {
+								logd("CONNECT: handshake BADMAC – clearing cached APPKEY and re-provisioning…")
+								BleAppSec.clearKey(appCtx, address)
+
+								requestAndStoreAppKeyWithPrompt(address, forcePrompt = true) { okKey, errKey ->
+									if (!okKey) {
+										onDone?.invoke(false, errKey ?: "APPKEY failed after BADMAC")
+										return@requestAndStoreAppKeyWithPrompt
 									}
+									reconnectExpectingB0AndHandshake { okH2, errH2 ->
+										_connected.postValue(okH2)
+										onDone?.invoke(okH2, errH2)
+									}
+								}
+								return@doBinaryHandshakeFromB0
+							}
 
-                                    // 2) wrong APPKEY (BADMAC) – only auto-recover when prompted flow is allowed
-                                    if (allowPrompt && errH?.contains("BADMAC") == true) {
-                                        logd("CONNECT: handshake BADMAC – clearing cached APPKEY and re-provisioning…")
-                                        BleAppSec.clearKey(appCtx, address)
-
-                                        // Password prompt + GET_APPKEY + store in BleAppSec
-                                        requestAndStoreAppKeyWithPrompt(address, forcePrompt = true) { okKey, errKey ->
-                                            if (!okKey) {
-                                                onDone?.invoke(false, errKey ?: "APPKEY failed after BADMAC")
-                                                return@requestAndStoreAppKeyWithPrompt
-                                            }
-
-                                            // After provisioning, drop and re-establish the connection expecting B0 again
-                                            reconnectExpectingB0AndHandshake { okH2, errH2 ->
-                                                _connected.postValue(okH2)
-                                                onDone?.invoke(okH2, errH2)
-                                            }
-                                        }
-                                        return@doBinaryHandshakeFromB0
-                                    }
-
-                                    // Fallback: just propagate whatever error we got
-                                    onDone?.invoke(false, errH)									
-                                }
-                            }
-                            plain != null -> {
-                                val (layout, proto, fw) = plain
-                                logd("CONNECT: PLAINTEXT INFO (unprovisioned): LAYOUT=$layout PROTO=$proto FW=$fw")
-                                logd("DEBUG: allowPrompt=$allowPrompt, appKeyExists=" + (BleAppSec.getKey(appCtx, address) != null))
-
-                                // device says it's unprovisioned - drop any stale cached key
-                                BleAppSec.clearKey(appCtx, address)
-                                logd("DEBUG: cleared stale APPKEY for $address (saw plaintext 'unprovisioned' banner)")
-
-                                // Store layout immediately
-                                PreferencesUtil.setKeyboardLayout(appCtx, layout)
-
-                                if (!allowPrompt) {
-                                    // Startup path: do NOT prompt here
-                                    if (!suppressAutoDisable) {
-                                        disableAutoConnect("Failed to connect: device is unprovisioned.")
-                                    }
-                                    onDone?.invoke(false, "unprovisioned")
-                                    return@waitForInfoBannerOrB0
-                                }
-
-                                logd("DEBUG: calling requestAndStoreAppKeyWithPrompt() ...")
-                                // Prompt for password, GET_APPKEY, reconnect, expect B0, handshake
-                                requestAndStoreAppKeyWithPrompt(address, forcePrompt = true) { okKey, errKey ->
-                                    if (!okKey) {
-                                        onDone?.invoke(false, errKey ?: "APPKEY failed")
-                                        return@requestAndStoreAppKeyWithPrompt
-                                    }
-                                    reconnectExpectingB0AndHandshake { okH, errH ->
-                                        _connected.postValue(okH)
-                                        onDone?.invoke(okH, errH)
-                                    }
-                                }
-                            }
-                            else -> {
-                                // no banner/B0 within timeout
-                                if (left > 0) {
-                                    ensureMgr().disconnect()
-                                    attempt(left - 1)
-                                } else {
-                                    if (!allowPrompt && !suppressAutoDisable) {
-                                        disableAutoConnect("Output device is not responding.")
-                                    }
-                                    onDone?.invoke(false, "No banner/B0")
-                                }
-                            }
-                        }
-                    }
+							// propagate other errors
+							onDone?.invoke(false, errH)
+						}
+					}
+						
                 }
             }
         }
         attempt(retries)
     }
 
-    fun disconnect() {
-        ensureMgr().disconnect()
-        _connected.postValue(false)
-        // Drop MTLS + fast-key state on explicit disconnect
-        mtls = null
-        fastKeysSessionEnabled = false		
-    }	
+	fun disconnect(suppressMs: Long = 0L) {
+		// Only suppress auto-connect when explicitly requested (plugin case)
+		if (suppressMs > 0) {
+			suppressAutoConnectFor(suppressMs)
+		}
+
+		ensureMgr().disconnect()
+		setBleUp(false)
+	}	
+	
+	fun disconnectFromPlugin() {
+		// This is the ONLY place we want the 4s suppression
+		disconnect(suppressMs = 4000L)
+	}	
+	
+	fun clearAutoConnectSuppress() {
+		suppressAutoConnectUntilMs = 0L
+	}
 	
 	////////////////////////////////////////////////////////////////////
 	// Binary framing:
@@ -709,7 +728,6 @@ object BleHub
 	// Framer accumulates arbitrary BLE notification chunks and
 	// extracts complete frames while being robust against:
 	//
-	//   - noisy ASCII banners mixed with binary.
 	//   - split frames (header / payload arriving separately).
 	//   - bogus LEN values (sanity-capped via MAX_LEN).
 	//
@@ -760,7 +778,7 @@ object BleHub
 				logd( String.format("RX:frame op=0x%02X len=%d head=%s",
 					op, pay.size, pay.copyOfRange(0, minOf(16, pay.size)).toHex()))
 				i += 3 + len
-				// After consuming a frame, there may be banner junk again; try to resync
+				// After consuming a frame, there may be stray bytes; try to resync
 				while (i < ba.size && !plausibleFrameAt(i)) i++
 			}
 
@@ -780,6 +798,9 @@ object BleHub
 	private fun leInt(i: Int) = java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(i).array()
 	private fun beShort(s: Int) = java.nio.ByteBuffer.allocate(2).order(java.nio.ByteOrder.BIG_ENDIAN).putShort(s.toShort()).array()
 	private fun leShort(s: Int) = java.nio.ByteBuffer.allocate(2).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(s.toShort()).array()
+	private fun rdU16be(b: ByteArray, off: Int): Int {
+		return ((b[off].toInt() and 0xFF) shl 8) or (b[off + 1].toInt() and 0xFF)
+	}
 
 	// Put near hmacSha256() helpers
 	private fun pbkdf2Sha256_bytes(passBytes: ByteArray, salt: ByteArray, iters: Int, dkLen: Int = 32): ByteArray {
@@ -825,12 +846,14 @@ object BleHub
 	// sid = session id (32-bit).
 	// seq = 16-bit sequence number.
 	////////////////////////////////////////////////////////////////////
-	private fun mtlsIv(key: ByteArray, sid: Int, dir: Char, seq: Int): ByteArray {
+	private fun mtlsIv(kIv: ByteArray, sid: Int, dir: Char, seq: Int): ByteArray {
 		val ivMsg = java.io.ByteArrayOutputStream().apply {
-			write("IV".toByteArray()); write(byteArrayOf(0))
-			write(beInt(sid)); write(byteArrayOf(dir.code.toByte())); write(beShort(seq))
+			write(byteArrayOf('I'.code.toByte(), 'V'.code.toByte(), '1'.code.toByte())) // "IV1"
+			write(beInt(sid))
+			write(byteArrayOf(dir.code.toByte()))
+			write(beShort(seq))
 		}.toByteArray()
-		return hmacSha256(key, ivMsg).copyOf(16)
+		return hmacSha256(kIv, ivMsg).copyOf(16)
 	}
 
 	////////////////////////////////////////////////////////////////////
@@ -848,23 +871,41 @@ object BleHub
 	////////////////////////////////////////////////////////////////////
 	private fun wrapB3(plainAppFrame: ByteArray): ByteArray {
 		val st = mtls ?: error("no mtls")
-		val key = st.sessKey ?: error("no sessKey")
+		val kEnc = st.kEnc ?: error("no kEnc")
+		val kMac = st.kMac ?: error("no kMac")
+		val kIv  = st.kIv  ?: error("no kIv")
+
 		val seq = st.seqOut and 0xFFFF
-		
-		val iv  = mtlsIv(key, st.sid, 'C', seq)
-		
-		val enc = aesCtrEnc(key, iv, plainAppFrame)
+
+		// Match dongle behavior: it drops session at 0xFFFF (avoid IV reuse)
+		if (seq == 0xFFFF) {
+			mtls = null
+			_connected.postValue(false)
+			throw IllegalStateException("MTLS seqOut wrap imminent; dropped session")
+		}
+
+		val iv  = mtlsIv(kIv, st.sid, 'C', seq)
+		val enc = aesCtrEnc(kEnc, iv, plainAppFrame)
 
 		val macData = java.io.ByteArrayOutputStream().apply {
-			write("ENCM".toByteArray()); write(beInt(st.sid)); write(byteArrayOf('C'.code.toByte())); write(beShort(seq)); write(enc)
+			write("ENCM".toByteArray())
+			write(beInt(st.sid))
+			write(byteArrayOf('C'.code.toByte()))
+			write(beShort(seq))
+			write(enc)
 		}.toByteArray()
-		val mac = hmac16(key, macData)
+		val mac = hmac16(kMac, macData)
 
+		// B3 payload fields are BE on dongle: seq2/clen2 big-endian
 		val pay = java.io.ByteArrayOutputStream().apply {
-			write(leShort(seq)); write(leShort(enc.size)); write(enc); write(mac)
+			write(beShort(seq))
+			write(beShort(enc.size))
+			write(enc)
+			write(mac)
 		}.toByteArray()
+
 		st.seqOut = (seq + 1) and 0xFFFF
-		return byteArrayOf(0xB3.toByte()) + u16le(pay.size) + pay
+		return byteArrayOf(0xB3.toByte()) + u16le(pay.size) + pay  // outer LEN stays LE (matches dongle)
 	}
 	
 	////////////////////////////////////////////////////////////////////	
@@ -1267,6 +1308,9 @@ object BleHub
         val raw = payload.toString(Charsets.UTF_8)
 
         return when {
+			raw.contains("LOCKED_SINGLE_NEED_RESET", ignoreCase = true) ->
+				"Dongle is locked (single-app strict mode). To provision a new app you must factory reset the dongle."
+			
             raw.startsWith("already set", ignoreCase = true) ->
                 "Cannot get APPKEY: dongle is already provisioned in single-app mode. " +
                 "To pair a new app you need to reset the dongle to factory defaults."
@@ -1334,16 +1378,21 @@ object BleHub
 		ensureMgr().connect(addr) { ok, err ->
 			if (!ok) { done(false, err); return@connect }
 			ensureNotificationsEnabled(addr) { _, _ ->
-				waitForInfoBannerOrB0(totalTimeoutMs = 5000L) { plain, b0 ->
-					when {
-						b0 != null -> {
-							doBinaryHandshakeFromB0(addr, b0) { okH, errH ->
-								_connected.postValue(okH)
-								done(okH, errH)
-							}
-						}
-						plain != null -> done(false, "unprovisioned")
-						else -> done(false, "No banner/B0")
+				waitForB0(totalTimeoutMs = 5000L) { b0 ->
+					if (b0 == null) {
+						done(false, "No B0")
+						return@waitForB0
+					}
+
+					val hasKey = BleAppSec.getKey(appCtx, addr) != null
+					if (!hasKey) {
+						done(false, "APPKEY missing")
+						return@waitForB0
+					}
+
+					doBinaryHandshakeFromB0(addr, b0) { okH, errH ->
+						_connected.postValue(okH)
+						done(okH, errH)
 					}
 				}
 			}
@@ -1391,38 +1440,62 @@ object BleHub
 	{
 		// We’ll scan frames until we see a B3; then decrypt; then parse inner [OP|LEN|PAYLOAD]
 		val framer = Framer()
+
 		val st = mtls ?: return onResult(null)
-		val key = st.sessKey ?: return onResult(null)
+		val kEnc = st.kEnc ?: return onResult(null)
+		val kMac = st.kMac ?: return onResult(null)
+		val kIv  = st.kIv  ?: return onResult(null)
 
 		fun tryInner(frame: Frame): ByteArray? {
-			if (frame.op != 0xB3) return null
+			if (frame.op != 0xB3) {
+				// If dongle forces re-handshake mid-stream, you'll see a fresh B0.
+				if (frame.op == 0xB0) {
+					mtls = null
+					_connected.postValue(false)
+				}
+				return null
+			}
+
 			val p = frame.payload
-			if (p.size < 2+2+16) return null
-			val seq  = rdU16le(p, 0)
-			val clen = rdU16le(p, 2)
-			if (p.size != 2+2+clen+16) return null
-			val cipher = p.copyOfRange(4, 4+clen)
-			val macIn  = p.copyOfRange(4+clen, 4+clen+16)
+			if (p.size < 2 + 2 + 16) return null
 
-			// MAC verify: HMAC(sess,"ENCM"||sid||'C'||seq||cipher)[0..16] for inbound dir='C'
+			// seq/clen are BE now
+			val seq  = rdU16be(p, 0)
+			val clen = rdU16be(p, 2)
+			if (p.size != 2 + 2 + clen + 16) return null
+
+			val cipher = p.copyOfRange(4, 4 + clen)
+			val macIn  = p.copyOfRange(4 + clen, 4 + clen + 16)
+
+			// replay protection (server->client)
+			if (seq != (st.seqIn and 0xFFFF)) return null
+
 			val macData = java.io.ByteArrayOutputStream().apply {
-				//write("ENCM".toByteArray()); write(beInt(st.sid)); write(byteArrayOf('C'.code.toByte())); write(beShort(seq)); write(cipher)
-				write("ENCM".toByteArray()); write(beInt(st.sid)); write(byteArrayOf('S'.code.toByte())); write(beShort(seq)); write(cipher)
-				
+				write("ENCM".toByteArray())
+				write(beInt(st.sid))
+				write(byteArrayOf('S'.code.toByte()))
+				write(beShort(seq))
+				write(cipher)
 			}.toByteArray()
-			val macExp = hmac16(key, macData)
-			if (!macExp.contentEquals(macIn)) return null
+			val macExp = hmac16(kMac, macData)
+			if (!macExp.contentEquals(macIn)) {
+				// If the dongle dropped session, this will happen; force reconnect path
+				mtls = null
+				_connected.postValue(false)
+				return null
+			}
 
-			// Decrypt
-			//val iv = mtlsIv(key, st.sid, 'C', seq)
-			val iv = mtlsIv(key, st.sid, 'S', seq)
-			
-			val plain = aesCtrEnc(key, iv, cipher)
+			val iv = mtlsIv(kIv, st.sid, 'S', seq)
+			val plain = aesCtrEnc(kEnc, iv, cipher)
+
 			if (plain.size < 3) return null
 			val op = plain[0].toInt() and 0xFF
 			val L  = rdU16le(plain, 1)
-			if (plain.size != 3+L) return null
-			return if (op == expectOp) plain.copyOfRange(3, 3+L) else null
+			if (plain.size != 3 + L) return null
+
+			st.seqIn = (st.seqIn + 1) and 0xFFFF
+
+			return if (op == expectOp) plain.copyOfRange(3, 3 + L) else null
 		}
 
 		// First one-shot, then stream if needed
@@ -1623,52 +1696,46 @@ object BleHub
         }
     }
 
-	////////////////////////////////////////// NEW BANNER AND GETAPP KEY
-	// Wait until we see EITHER the plaintext INFO banner (unprovisioned) OR a binary B0 frame (provisioned)
-	private fun waitForInfoBannerOrB0(
-		totalTimeoutMs: Long,
-		onDone: (plain: Triple<String,String,String>?, b0Payload: ByteArray?) -> Unit
-	) {
-		val deadline = android.os.SystemClock.elapsedRealtime() + totalTimeoutMs
+	//////////////////////////////////////////
+	// Wait for B0 (server hello) after connect+notify.
+	// This is the only connect "ready" signal now.
+	fun waitForB0(totalTimeoutMs: Long, onDone: (b0Payload: ByteArray?) -> Unit) {
 		val framer = Framer()
-		val sb = java.io.ByteArrayOutputStream()
 		var finished = false
+		val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
-		fun finish(plain: Triple<String,String,String>?, b0: ByteArray?) {
+		fun finish(b0: ByteArray?) {
 			if (finished) return
 			finished = true
-			ensureMgr().stopNotificationStream()
-			onDone(plain, b0)
+			try { ensureMgr().stopNotificationStream() } catch (_: Throwable) {}
+			handler.removeCallbacksAndMessages(null)
+			onDone(b0)
 		}
 
-		// Start streaming raw notify chunks
+		// HARD timeout independent of notifications arriving
+		val to = Runnable {
+			logd("CONNECT: waitForB0 HARD TIMEOUT (${totalTimeoutMs}ms)")
+			finish(null)
+		}
+		handler.postDelayed(to, totalTimeoutMs)
+
+		// Avoid overlapping streams from previous waits
+		try { ensureMgr().stopNotificationStream() } catch (_: Throwable) {}
+
 		ensureMgr().startNotificationStream { chunk ->
 			if (finished) return@startNotificationStream
+			if (chunk == null || chunk.isEmpty()) return@startNotificationStream
 
-			// 1) Try binary first (B0)
 			val frames = framer.push(chunk)
-			frames.firstOrNull { it.op == 0xB0 }?.let { frame ->
-				logd( "CONNECT: detected B0 (len=${frame.payload.size})")
-				mtls = null
-				finish(null, frame.payload)
-				return@startNotificationStream
-			}
-
-			// 2) Also accumulate for plaintext banner (unprovisioned)
-			sb.write(chunk)
-			parsePlainInfo(sb.toByteArray())?.let {
-				logd( "CONNECT: detected PLAINTEXT INFO banner")
-				finish(it, null)
-				return@startNotificationStream
-			}
-
-			// timeout guard
-			if (android.os.SystemClock.elapsedRealtime() >= deadline) {
-				logd( "CONNECT: no banner/B0 before timeout")
-				finish(null, null)
+			for (f in frames) {
+				if (f.op == 0xB0) {
+					finish(f.payload)
+					return@startNotificationStream
+				}
 			}
 		}
 	}
+
 
 	////////////////////////////////////////////////////////////////////
 	// MTLS handshake from B0.
@@ -1696,7 +1763,9 @@ object BleHub
 		if (b0Payload.size != 69) { onDone(false, "Bad B0"); return }
 		val srvPub65 = b0Payload.copyOfRange(0, 65)
 		val sid = java.nio.ByteBuffer.wrap(b0Payload, 65, 4)
-			.order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+			.order(java.nio.ByteOrder.BIG_ENDIAN)
+			.int
+			
 		val appKey = BleAppSec.getKey(appCtx, address)
 		if (appKey == null) {
 			logd("MTLS: no APPKEY for $address – failing handshake")
@@ -1713,14 +1782,14 @@ object BleHub
 		// check if this is LE on the dongle
 		val keyxMsg = java.io.ByteArrayOutputStream().apply {
 			write("KEYX".toByteArray())
-			write(leInt(sid))
+			write(beInt(sid))
 			write(srvPub65)
 			write(cliPub65)
 		}.toByteArray()
 		val mac16 = hmac16(appKey, keyxMsg)
 
 		// debug
-		logd( "B1 sid(le)=${leInt(sid).toHex()} srv[0..4]=${srvPub65.copyOfRange(0,5).toHex()} cli[0..4]=${cliPub65.copyOfRange(0,5).toHex()} mac16=${mac16.toHex()}")
+		logd( "B1 sid(le)=${beInt(sid).toHex()} srv[0..4]=${srvPub65.copyOfRange(0,5).toHex()} cli[0..4]=${cliPub65.copyOfRange(0,5).toHex()} mac16=${mac16.toHex()}")
 
 
 		val b1Pay = cliPub65 + mac16
@@ -1754,17 +1823,36 @@ object BleHub
 				}.toByteArray()
 				val sess = hkdfSha256(appKey, shared, info)
 
-				// Verify B2 mac16 == HMAC(sess, "SFIN"||sid||srv_pub||cli_pub)[0..16]
+				// Derive kMac *before* verifying SFIN (dongle uses kMac, not sess)
+				val kEnc = hmacSha256(sess, "ENC".toByteArray())
+				val kMac = hmacSha256(sess, "MAC".toByteArray())
+				val kIv  = hmacSha256(sess, "IVK".toByteArray())
+
+				// Verify B2 mac16 == HMAC(kMac, "SFIN"||sid||srv_pub||cli_pub)[0..16]
 				val sfin = java.io.ByteArrayOutputStream().apply {
 					write("SFIN".toByteArray())
-					write(leInt(sid))
+					write(beInt(sid))
 					write(srvPub65)
 					write(cliPub65)
 				}.toByteArray()
-				val expect = hmac16(sess, sfin)
-				if (!expect.contentEquals(resp.payload)) { onDone(false, "SFIN mismatch"); return@awaitNextFrame }
 
-				mtls = MtlsState(sid = sid, sessKey = sess, seqOut = 0)
+				val expect = hmac16(kMac, sfin)
+				if (!expect.contentEquals(resp.payload)) {
+					onDone(false, "SFIN mismatch")
+					return@awaitNextFrame
+				}
+
+				// Now store state
+				mtls = MtlsState(
+					sid = sid,
+					sessKey = sess,
+					kEnc = kEnc,
+					kMac = kMac,
+					kIv  = kIv,
+					seqOut = 0,
+					seqIn  = 0
+				)
+
 				// new session, raw fast mode off by default
 				fastKeysSessionEnabled = false  
 				
@@ -1802,30 +1890,88 @@ object BleHub
         toast("$reason\nGo to Settings - Output device to reconnect.")        
     }
 
+	////////////////////////////////////////////////////////////////////
 	private fun reconnectExpectingB0AndHandshake(
 		onDone: (Boolean, String?) -> Unit = { _, _ -> }
 	) {
 		val addr = PreferencesUtil.getOutputDeviceId(appCtx)
 		if (addr.isNullOrBlank()) { onDone(false, "No device"); return }
 
+		// Fully drop old GATT
+		ensureMgr().stopNotificationStream()
 		ensureMgr().disconnect()
-		mainHandler.postDelayed({
-			ensureMgr().connect(addr) { ok, err ->
-				if (!ok) { onDone(false, err); return@connect }
-				
-				ensureNotificationsEnabled(addr) { _, _ ->			
-						// After APPKEY set, firmware sends ONLY B0 on connect
-						waitForInfoBannerOrB0(totalTimeoutMs = 5000L) { plain, b0 ->
+
+		// Give the dongle time to flip from "provisioning" to "secure ready"
+		val backoffMs = 2000L   // time to wait after disconnect
+
+		fun failAndDrop(msg: String) {
+			try { ensureMgr().stopNotificationStream() } catch (_: Throwable) {}
+			try { ensureMgr().disconnect() } catch (_: Throwable) {}
+			setBleUp(false)
+			onDone(false, msg)
+		}
+
+		// Wait for disconnect (or timeout), THEN back off, THEN reconnect
+		ensureMgr().awaitDisconnected(timeoutMs = 2500L) { _ ->   // <- was 1500L
+			logd("RECONNECT: disconnected (or timed out). Backing off ${backoffMs}ms before connect…")
+
+			mainHandler.postDelayed({
+				ensureMgr().connect(addr, connectTimeoutMs = 3500L) { ok, err ->
+					if (!ok) {
+						failAndDrop(err ?: "Reconnect failed")
+						return@connect
+					}
+
+					setBleUp(true)
+
+					ensureNotificationsEnabled(addr) { _, _ ->
+						waitForB0(totalTimeoutMs = 5000L) { b0 ->
 							if (b0 == null) {
-								logd( "RECONNECT: expected B0, got ${if (plain!=null) "PLAINTEXT" else "nothing"}")
-								onDone(false, "No B0 after provisioning")
-							} else {
-								doBinaryHandshakeFromB0(addr, b0, onDone)
+								logd("RECONNECT: expected B0, got nothing")
+								failAndDrop("No B0 after provisioning")
+								return@waitForB0
+							}
+
+							doBinaryHandshakeFromB0(addr, b0) { okH, errH ->
+								if (!okH) {
+									failAndDrop(errH ?: "Handshake failed after provisioning")
+									return@doBinaryHandshakeFromB0
+								}
+								
+								// Handshake is good — make sure the Settings toggle stays ON
+								PreferencesUtil.setUseExternalKeyboardDevice(appCtx, true)
+								PreferencesUtil.setOutputDeviceDisabledByError(appCtx, false)
+	
+								onSecureSessionReady(addr, onDone)
 							}
 						}
+					}
 				}
+			}, backoffMs)
+		}
+	}
+
+	////////////////////////////////////////////////////////////////////
+	// Call once MTLS is established to refresh layout in prefs.
+	// Does not treat layout failure as a hard error.
+	////////////////////////////////////////////////////////////////////
+	private fun onSecureSessionReady(
+		addr: String,
+		upstream: ((Boolean, String?) -> Unit)?
+	) {
+		_connected.postValue(true)
+
+		// Optional: query layout over secure channel and cache it
+		getLayout(timeoutMs = 4000L) { okInfo, layout, errInfo ->
+			if (okInfo && layout != null) {
+				logd("CONNECT: secure GET_INFO -> layout=$layout")
+				PreferencesUtil.setKeyboardLayout(appCtx, layout)
+			} else {
+				logd("CONNECT: GET_INFO failed after handshake: ${errInfo ?: "unknown"}")
 			}
-		}, 1000L)
+
+			upstream?.invoke(true, null)
+		}
 	}
 
 	////////////////////////////////////////////////////////////////////
@@ -2010,4 +2156,23 @@ object BleHub
 		onDone(true, null)
 	}
 
+	// True if Settings has a target dongle selected
+	fun hasSelectedDevice(): Boolean {
+		val addr = PreferencesUtil.getOutputDeviceId(appCtx)
+		return !addr.isNullOrBlank()
+	}
+
+	// UI helper: connect to the currently selected device from prefs.
+	// Used by MainActivity LED tap logic.
+	fun connectSelectedDevice(onDone: (Boolean, String?) -> Unit) {
+		// No password prompts from the main screen. This is a "try connect/reconnect" action.
+		connectAndFetchLayoutSimple(
+			timeoutMs = 3500L,
+			retries = 1,
+			allowPrompt = false,
+			onDone = onDone
+		)
+	}
+
 }
+

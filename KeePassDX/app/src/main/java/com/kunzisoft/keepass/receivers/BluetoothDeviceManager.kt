@@ -76,6 +76,9 @@ class BluetoothDeviceManager(private val context: Context)
 
     /** Combined list (bonded ∪ scanned) */
     val devices = MutableLiveData<List<BtDevice>>(emptyList())
+	// True when the GATT transport is connected (STATE_CONNECTED).
+	// This is NOT "secure MTLS ready" – BleHub.connected covers that.
+	val bleConnected = MutableLiveData(false)
 
     private val devicesMap = LinkedHashMap<String, BtDevice>()
     private var scanning = false
@@ -94,10 +97,21 @@ class BluetoothDeviceManager(private val context: Context)
 	// track if we've already kicked off a discoverServices() for this connection
 	@Volatile private var servicesDiscoveryStarted: Boolean = false
 
+	@Volatile private var pendingCloseGatt: android.bluetooth.BluetoothGatt? = null
+	@Volatile private var shouldCloseOnDisconnect: Boolean = false
+	@Volatile private var intentionalDisconnect: Boolean = false
+	@Volatile private var connecting: Boolean = false
 
 	// Tracks the MTU negotiated with the current GATT connection.
 	// Default is 23 until onMtuChanged() is called.
 	@Volatile private var currentMtu: Int = 23
+
+	// to track pairing state
+	@Volatile private var bondWaiter: ((Boolean) -> Unit)? = null
+	@Volatile private var bondWaiterAddr: String? = null
+	private var bondReceiverRegistered = false
+	
+	@Volatile private var bondTimeoutRunnable: Runnable? = null
 
 	// Quick readiness check for UI / higher layers.
 	// Returns true if the adapter exists and is currently turned ON.
@@ -323,6 +337,65 @@ class BluetoothDeviceManager(private val context: Context)
         } catch (_: Throwable) { false }
     }
 	
+	// wait for bonding/pairing - not to race with connect
+	////////////////////////////////////////////////////////////////
+	@SuppressLint("MissingPermission")
+	@RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+	fun awaitBonded(address: String, timeoutMs: Long = 15000L, onDone: (Boolean) -> Unit) {
+		val dev = try { adapter?.getRemoteDevice(address) } catch (_: IllegalArgumentException) { null }
+		if (dev == null) { onDone(false); return }
+
+		// Already bonded -> done immediately
+		val st = try { dev.bondState } catch (_: SecurityException) { BluetoothDevice.BOND_NONE }
+		if (st == BluetoothDevice.BOND_BONDED) {
+			onDone(true)
+			return
+		}
+
+		// Register receiver once
+		if (!bondReceiverRegistered) {
+			val filter = android.content.IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+			context.registerReceiver(object : android.content.BroadcastReceiver() {
+				override fun onReceive(ctx: Context, intent: android.content.Intent) {
+					if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+					val d = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+					val addr = d.address ?: return
+					val newState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+
+					// Only resolve the waiter for the address we're waiting on
+					if (addr == bondWaiterAddr && (newState == BluetoothDevice.BOND_BONDED || newState == BluetoothDevice.BOND_NONE)) {
+						
+						// Cancel timeout so it can't fire after we've already completed
+						bondTimeoutRunnable?.let { main.removeCallbacks(it) }
+						bondTimeoutRunnable = null
+	
+						val cb = bondWaiter
+						bondWaiter = null
+						bondWaiterAddr = null
+						cb?.invoke(newState == BluetoothDevice.BOND_BONDED)
+					}
+				}
+			}, filter)
+			bondReceiverRegistered = true
+		}
+
+		bondWaiter = onDone
+		bondWaiterAddr = address
+
+		// Timeout (store runnable so we can cancel it on success)
+		bondTimeoutRunnable?.let { main.removeCallbacks(it) }
+		bondTimeoutRunnable = Runnable {
+			if (bondWaiterAddr == address) {
+				val cb = bondWaiter
+				bondWaiter = null
+				bondWaiterAddr = null
+				cb?.invoke(false)
+			}
+		}
+		main.postDelayed(bondTimeoutRunnable!!, timeoutMs)
+
+	}
+	
 	// --- Persistent GATT connection state ---
 	//
 	// gatt             : current live BluetoothGatt, if any.
@@ -424,6 +497,7 @@ class BluetoothDeviceManager(private val context: Context)
 	// Clears pending timeouts and invokes resultCb(true).
 	////////////////////////////////////////////////////////////////
 	fun succeed() {
+		connecting = false
 		main.removeCallbacks(connectTimeoutRunnable)      
 		val cb = resultCb
 		resultCb = null
@@ -436,6 +510,8 @@ class BluetoothDeviceManager(private val context: Context)
 	// Clears pending timeouts and invokes resultCb(false, msg).	
 	////////////////////////////////////////////////////////////////
 	fun fail(msg: String) {
+		connecting = false
+		bleConnected.postValue(false)
 		main.removeCallbacks(connectTimeoutRunnable)      
 		val cb = resultCb
 		resultCb = null
@@ -459,27 +535,75 @@ class BluetoothDeviceManager(private val context: Context)
 	private fun cleanupGatt() {
 		try {
 			main.removeCallbacks(timeoutRunnable)
-			main.removeCallbacks(connectTimeoutRunnable)   // connection timeout
+			main.removeCallbacks(connectTimeoutRunnable)
 		} catch (_: Throwable) {}
-	
-		try { gatt?.disconnect() } catch (_: Throwable) {}
-		try { gatt?.close() } catch (_: Throwable) {}
+
+		val g = gatt
 		gatt = null
+		bleConnected.postValue(false)
+
+		// reset local state immediately
 		resultCb = null
 		discovered = false
 		connectedAddress = null
 		lastCharacteristic = null
-		// notify
-        notifyCharacteristic = null
-        notificationsEnabled = false
+		notifyCharacteristic = null
+		notificationsEnabled = false
 		servicesDiscoveryStarted = false
-		
+		streamListener = null
 		synchronized(notifBuffer) { notifBuffer.clear() }
 		try { notifTimeouts.removeCallbacksAndMessages(null) } catch (_: Throwable) {}
 		notifListener = null
-		
 		closeAfterOp = true
+
+		if (g != null) {
+			// request disconnect; close later when we get STATE_DISCONNECTED
+			pendingCloseGatt = g
+			shouldCloseOnDisconnect = true
+			try { g.disconnect() } catch (_: Throwable) {}
+
+			// safety close if callback never arrives
+			val scheduledGatt = g  // capture exact instance we intend to close
+			main.postDelayed({
+				val cur = gatt
+
+				// Only close the gatt we scheduled, and NEVER if it's currently active.
+				if (shouldCloseOnDisconnect &&
+					pendingCloseGatt === scheduledGatt &&
+					cur !== scheduledGatt) {
+
+					logd("SAFETY CLOSE old gatt=$scheduledGatt addr=${scheduledGatt.device.address} (current=$cur)")
+					try { scheduledGatt.close() } catch (_: Throwable) {}
+					pendingCloseGatt = null
+					shouldCloseOnDisconnect = false
+				} else {
+					logd("SAFETY CLOSE skipped (pending changed or gatt is current)")
+				}
+			}, 1500L)
+
+		}
 	}
+
+	private fun isStaleGatt(g: android.bluetooth.BluetoothGatt): Boolean {
+		val cur = gatt
+
+		// If we have an active "current gatt", anything else is stale.
+		if (cur != null && cur !== g) {
+			logd("IGNORING stale callback from gatt=$g addr=${g.device.address} (current=$cur)")
+			return true
+		}
+
+		// IMPORTANT: callbacks from pendingCloseGatt must NOT be treated as stale,
+		// because we rely on STATE_DISCONNECTED to close() it and to fire awaitDisconnected().
+		val pg = pendingCloseGatt
+		if (pg != null && pg === g) {
+			// allow these callbacks through
+			return false
+		}
+
+		return false
+	}
+
 
 	////////////////////////////////////////////////////////////////////
 	// connect()
@@ -517,6 +641,8 @@ class BluetoothDeviceManager(private val context: Context)
 		connectedAddress = address
 		discovered = false
 		servicesDiscoveryStarted = false
+		connecting = true
+		intentionalDisconnect = false
 
 		// arm connect watchdog if requested
 		main.removeCallbacks(connectTimeoutRunnable)
@@ -527,8 +653,15 @@ class BluetoothDeviceManager(private val context: Context)
 		main.post {
 			try {
 				// Do NOT teardown after this - we keep a live GATT for the app session
-				try { gatt?.disconnect() } catch (_: Throwable) {}
-				try { gatt?.close() } catch (_: Throwable) {}
+				//try { gatt?.disconnect() } catch (_: Throwable) {}
+				//try { gatt?.close() } catch (_: Throwable) {}
+				val old = gatt
+				if (old != null) {
+					pendingCloseGatt = old
+					shouldCloseOnDisconnect = true
+					try { old.disconnect() } catch (_: Throwable) {}
+				}
+				gatt = null
 				
 				// change to fix broken new phones connect
 				//gatt = dev.connectGatt(context, /*autoConnect*/ false, persistentGattCb)
@@ -572,7 +705,7 @@ class BluetoothDeviceManager(private val context: Context)
 	//
 	// Responsibilities:
 	//  - Bump connection priority on connect.
-	//  - Negotiate MTU (aiming for 247 bytes).
+	//  - Negotiate MTU (aiming for 185 or 247 bytes).
 	//  - Discover services and locate NUS TX/RX characteristics.
 	//  - Enable notifications on RX (write CCCD).
 	//  - Route notifications to stream / one-shot listeners.
@@ -581,12 +714,23 @@ class BluetoothDeviceManager(private val context: Context)
 	private val persistentGattCb = object : android.bluetooth.BluetoothGattCallback() 
 	{
 		override fun onConnectionStateChange(g: android.bluetooth.BluetoothGatt, status: Int, newState: Int) {
+			if (isStaleGatt(g)) return
 			
 			logd("onConnectionStateChange: status=$status newState=$newState for ${g.device.address}")
 			
 			// Connected: request high priority and a larger MTU before service discovery
 			if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS &&
 				newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+
+				bleConnected.postValue(true)
+
+				// We have a new connected gatt. Make sure no "pending close" state can
+				// accidentally target this new session.
+				if (pendingCloseGatt != null && pendingCloseGatt !== gatt) {
+					logd("Clearing pendingCloseGatt after new connect (old=${pendingCloseGatt}, current=$gatt)")
+					pendingCloseGatt = null
+					shouldCloseOnDisconnect = false
+				}
 
 				// Prefer faster link for the initial handshake
 				if (android.os.Build.VERSION.SDK_INT >= 21) {
@@ -614,7 +758,7 @@ class BluetoothDeviceManager(private val context: Context)
 					*/
 					
 					// Optional MTU hint – see next section
-					val wantMtu = 247 // or 185/247 if your testing says it's stable
+					val wantMtu = 185 // or 185/247 if your testing says it's stable				
 					if (android.os.Build.VERSION.SDK_INT >= 21) {
 						try {
 							logd("requestMtu($wantMtu)")
@@ -659,12 +803,58 @@ class BluetoothDeviceManager(private val context: Context)
 			// Any other transition (disconnect / error) is treated as a failure
             // for the current operation. The app can decide whether to retry.
 			} else {
+				
+				// fire the one-shot "awaitDisconnected" callback if we truly disconnected
+				if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
+					
+					logd("STATE_DISCONNECTED for ${g.device.address} status=$status")
+					
+					bleConnected.postValue(false)
+
+					// fire awaitDisconnected waiter
+					onDisconnectedOnce?.let { cb ->
+						onDisconnectedOnce = null
+						cb()
+					}
+
+					// if this is the gatt we planned to close, close it now
+					val pg = pendingCloseGatt
+					if (shouldCloseOnDisconnect && pg === g) {
+						try { g.close() } catch (_: Throwable) {}
+						pendingCloseGatt = null
+						shouldCloseOnDisconnect = false
+						logd("Closed gatt after DISCONNECTED for ${g.device.address}")
+					}
+					
+					// If we initiated disconnect, swallow it and do NOT fail.
+					if (intentionalDisconnect) {
+						intentionalDisconnect = false
+						connecting = false
+						return
+					}
+
+					// If we are in the middle of connecting/reconnecting, do NOT fail immediately.
+					// Let connectTimeoutRunnable decide if it truly fails.
+					if (connecting) {
+						logd("DISCONNECTED while connecting — waiting for connect timeout (no fail yet)")
+						return
+					}
+
+					// Unexpected disconnect after having been connected -> fail.
+					fail("Disconnected status=$status")
+					return				
+				}
+				
+				bleConnected.postValue(false)
+				
 				loge("Connection change treated as failure: status=$status newState=$newState")
 				fail("Connection state=$newState status=$status")
 			}
 		}
 
         override fun onServicesDiscovered(g: android.bluetooth.BluetoothGatt, status: Int) {
+			if (isStaleGatt(g)) return
+			
 			logd("onServicesDiscovered: status=$status for ${g.device.address}")
             if (status == android.bluetooth.BluetoothGatt.GATT_SUCCESS) {
 				// Service discovery succeeded – mark as ready
@@ -718,6 +908,8 @@ class BluetoothDeviceManager(private val context: Context)
             descriptor: android.bluetooth.BluetoothGattDescriptor,
             status: Int
         ) {
+			if (isStaleGatt(g)) return
+			
 			logd("onDescriptorWrite: uuid=${descriptor.uuid} status=$status for ${g.device.address}")
 			
             // We don't fail the connect on CCCD errors – we just track whether
@@ -737,6 +929,8 @@ class BluetoothDeviceManager(private val context: Context)
 			g: android.bluetooth.BluetoothGatt,
 			characteristic: android.bluetooth.BluetoothGattCharacteristic
 		) {
+			if (isStaleGatt(g)) return
+			
 			logd("onCharacteristicChanged from ${g.device.address}, len=${characteristic.value?.size ?: -1}")
 			
             // Incoming notification from RX characteristic:
@@ -771,6 +965,8 @@ class BluetoothDeviceManager(private val context: Context)
 			mtu: Int,
 			status: Int
 		) {
+			if (isStaleGatt(g)) return
+			
 			logd("onMtuChanged: mtu=$mtu status=$status for ${g.device.address}")
 			
             // Record negotiated MTU and continue with service discovery.
@@ -796,6 +992,8 @@ class BluetoothDeviceManager(private val context: Context)
 			characteristic: android.bluetooth.BluetoothGattCharacteristic,
 			status: Int
 		) {
+			if (isStaleGatt(g)) return
+			
 			logd("onCharacteristicWrite: status=$status len=${characteristic.value?.size ?: -1} for ${g.device.address}")
 			
             // Write completed (with or without response).
@@ -941,7 +1139,50 @@ class BluetoothDeviceManager(private val context: Context)
 	// the GATT and reset all associated state.
 	////////////////////////////////////////////////////////////////////
 	fun disconnect() {
+		intentionalDisconnect = true
+		connecting = false
+		bleConnected.postValue(false)
+		stopNotificationStream()
+		
+		// Capture the instance before cleanupGatt nulls it.
+		val g = gatt
+	
 		cleanupGatt()
+		
+		// Hard-close fallback: makes disconnect deterministic on flaky stacks.
+		if (g != null) {
+			main.postDelayed({
+				try { g.close() } catch (_: Throwable) {}
+			}, 300L)
+		}		
+	}
+
+	private var onDisconnectedOnce: (() -> Unit)? = null
+	
+	fun awaitDisconnected(timeoutMs: Long = 500L, onDone: (Boolean) -> Unit) {
+		val cur = gatt
+		val pg  = pendingCloseGatt
+		val disconnectInProgress = (shouldCloseOnDisconnect && pg != null)
+
+		// Only return "already disconnected" if there's truly nothing to wait for.
+		if (cur == null && !disconnectInProgress) {
+			onDone(true)
+			return
+		}
+
+		val fired = booleanArrayOf(false)
+		onDisconnectedOnce = {
+			if (!fired[0]) {
+				fired[0] = true
+				onDone(true)
+			}
+		}
+
+		main.postDelayed({
+			if (fired[0]) return@postDelayed
+			onDisconnectedOnce = null
+			onDone(false)
+		}, timeoutMs)
 	}
 
 	////////////////////////////////////////////////////////////////////
@@ -973,7 +1214,7 @@ class BluetoothDeviceManager(private val context: Context)
 			notifListener = null
 			cb?.invoke(null) // timeout
 		}, timeoutMs)
-	}
+	}	
 	
 // end of class
 }

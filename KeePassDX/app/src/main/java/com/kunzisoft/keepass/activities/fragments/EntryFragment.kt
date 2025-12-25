@@ -99,7 +99,7 @@ class EntryFragment: DatabaseFragment() {
 			// Otherwise enable only when actually connected.
 			val shouldEnable = useExt && hasDevice && connected
 
-			// Using your existing affordance:
+			// Using existing affordance:
 			// setSendInProgress(false)  -> enabled/idle look
 			// setSendInProgress(true)   -> disabled/busy look
 			templateView.setSendInProgress(!shouldEnable)

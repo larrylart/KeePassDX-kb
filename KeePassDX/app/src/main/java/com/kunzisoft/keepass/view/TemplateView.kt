@@ -99,12 +99,8 @@ class TemplateView @JvmOverloads constructor(context: Context,
                     }
                 }
 				
-				// TemplateView.kt  (inside buildLinearTextView)
+				// Larry's add on
 				val isPassword = TemplateField.isStandardPasswordName(context, field.name)
-				// or, if that helper expects the localized canonical label:
-				// val isPassword = TemplateField.isStandardPasswordName(
-				//     context, TemplateField.getLocalizedName(context, field.name)
-				// )
 
 				if (isPassword) {
 					val show = PreferencesUtil.useExternalKeyboardDevice(context) &&
@@ -124,7 +120,7 @@ class TemplateView @JvmOverloads constructor(context: Context,
         }
     }
 
-	// Call this to toggle the password field's send button enabled/disabled
+	// Larry's toggle the password field's send button enabled/disabled
 	fun setSendInProgress(inProgress: Boolean) {
 		// The password view is tagged with FIELD_PASSWORD_TAG by the template builder
 		val passView: TextFieldView? = findViewWithTag(FIELD_PASSWORD_TAG)
